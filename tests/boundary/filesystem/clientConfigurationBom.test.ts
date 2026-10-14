@@ -8,6 +8,7 @@ import {
   clientRegistrationEntry,
   parseClientConfiguration,
 } from "../../../src/application/ClientConfigurationDocument.js";
+import { packageRunnerRegistrationCommand } from "../../../src/application/ClientRegistrationIdentity.js";
 import { readClientRegistrationStatuses } from "../../../src/application/ClientRegistrationStatus.js";
 import {
   clientConfigurationAligned,
@@ -137,8 +138,8 @@ it("restores original BOM-prefixed JSONC bytes after update and removal", async 
   await mkdir(dirname(client.configPath), { recursive: true });
   await writeFile(client.configPath, original);
 
-  const firstCommand = [join(home, "bin", "rea"), "mcp"];
-  const updatedCommand = [join(home, "updated", "bin", "rea"), "mcp"];
+  const firstCommand = packageRunnerRegistrationCommand("npx", "linux");
+  const updatedCommand = packageRunnerRegistrationCommand("bunx", "linux");
   expect(
     await configureClientConfiguration(client, {}, firstCommand),
   ).toMatchObject({ status: "configured" });
