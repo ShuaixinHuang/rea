@@ -47,7 +47,10 @@ The equivalent MCP input is:
 }
 ```
 
-`input_path` must be absolute. `format` accepts `auto`, `asar`, or `directory`.
+Use an absolute local `input_path` for unambiguous selection. Relative paths are
+also accepted and resolve against the REA MCP server process's working directory,
+which may differ from the client's working directory.
+`format` accepts `auto`, `asar`, or `directory`.
 `integrity_policy` accepts `fail` or `record-and-continue`; both CLI routes and
 the MCP tool default to `fail`.
 The result retains the canonical local path, root artifact digest, artifact
