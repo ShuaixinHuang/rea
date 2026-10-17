@@ -1,0 +1,55 @@
+name: Apple metadata focused verification
+
+on:
+  push:
+    branches: [codex/verify-apple-metadata-20261017]
+
+permissions:
+  contents: read
+
+env:
+  HUSKY: "0"
+
+jobs:
+  apple-metadata:
+    if: github.repository == 'ShuaixinHuang/rea'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 7f0cfad585c2ae26b75233b78ca121fe5b33950e
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+      - name: Bind verification to the PR source
+        env:
+          SOURCE_SHA: 7f0cfad585c2ae26b75233b78ca121fe5b33950e
+        run: |
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          test "$(uname -s)" = Darwin
+          node --version
+          npm --version
+          xcrun clang --version
+          xcrun swiftc --version
+      - run: npm ci
+      - name: Run exact CLI and file-backed metadata regressions
+        run: |
+          set -o pipefail
+          npm run test:focused -- tests/boundary/cli/nativeDispatchPropertyAttributes.test.ts tests/boundary/filesystem/appleDispatchMetadataStrings.test.ts 2>&1 | tee apple-metadata-focused.log
+      - name: Run real Objective-C and Swift CLI/MCP verification
+        env:
+          REA_ARTIFACT_NODE_COMPILE_CACHE: ${{ runner.temp }}/rea-artifact-node-cache
+        run: |
+          set -o pipefail
+          npm run verify:apple-dispatch 2>&1 | tee apple-dispatch.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: apple-metadata-verification
+          path: |
+            apple-metadata-focused.log
+            apple-dispatch.log
+          if-no-files-found: error
+          retention-days: 7
