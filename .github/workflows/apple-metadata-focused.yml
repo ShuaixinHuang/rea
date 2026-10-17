@@ -18,14 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 7f0cfad585c2ae26b75233b78ca121fe5b33950e
+          ref: 8c0021b023863b5a9c4e6f8fd72dca27bb3c6962
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .nvmrc
       - name: Bind verification to the PR source
         env:
-          SOURCE_SHA: 7f0cfad585c2ae26b75233b78ca121fe5b33950e
+          SOURCE_SHA: 8c0021b023863b5a9c4e6f8fd72dca27bb3c6962
         run: |
           test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
           test "$(uname -s)" = Darwin
