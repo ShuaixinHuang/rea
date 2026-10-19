@@ -30,9 +30,17 @@ const makePull = (
   state: "open",
   draft: false,
   body: readyBody,
-  head: { sha: "a".repeat(40) },
-  base: { ref: "main" },
   ...changes,
+  head: {
+    sha: "a".repeat(40),
+    repo: { owner: { login: "contributor" }, name: "rea" },
+    ...changes.head,
+  },
+  base: {
+    ref: "main",
+    repo: { owner: { login: "morluto" }, name: "rea" },
+    ...changes.base,
+  },
 });
 
 function fixture(changes: Partial<ReadinessPullRequest> = {}) {
@@ -45,7 +53,7 @@ function fixture(changes: Partial<ReadinessPullRequest> = {}) {
       >[0],
     ) => ({}),
   );
-  const paginate = vi.fn(async () => [pull]);
+  const paginate = vi.fn<ReadinessGitHub["paginate"]>(async () => [pull]);
   const github = {
     rest: {
       pulls: { get },
@@ -310,6 +318,144 @@ const readWorkflow = async () =>
         ),
       ),
     );
+
+describe("fork commit association", () => {
+  it("preserves declaration failure even when repository metadata is absent", async () => {
+    const input = fixture({ body: readyBody.replaceAll("[x]", "[ ]") });
+    input.get.mockResolvedValue({
+      data: { ...input.pull, head: { sha: input.pull.head.sha } },
+    });
+    expect((await runReadinessCheck(input))?.state).toBe("failure");
+    expect(input.paginate).not.toHaveBeenCalled();
+  });
+  it("queries the head repository and still publishes to the trusted base", async () => {
+    const input = fixture();
+    input.paginate.mockImplementation(async (_method, request) =>
+      request.owner === "contributor" ? [input.pull] : [],
+    );
+    expect((await runReadinessCheck(input))?.state).toBe("success");
+    expect(input.paginate).toHaveBeenCalledWith(
+      input.github.rest.repos.listPullRequestsAssociatedWithCommit,
+      {
+        owner: "contributor",
+        repo: "rea",
+        commit_sha: input.pull.head.sha,
+        per_page: 100,
+      },
+    );
+    expect(input.createCommitStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        owner: "morluto",
+        repo: "rea",
+        state: "success",
+      }),
+    );
+  });
+
+  it("ignores the same commit's PRs targeting another base repository", async () => {
+    const input = fixture();
+    input.paginate.mockResolvedValue([
+      input.pull,
+      makePull({
+        number: 43,
+        base: { ref: "main", repo: { owner: { login: "other" }, name: "rea" } },
+      }),
+    ]);
+    expect((await runReadinessCheck(input))?.state).toBe("success");
+  });
+
+  it("does not accept a matching PR number from another base repository", async () => {
+    const input = fixture();
+    input.paginate.mockResolvedValue([
+      makePull({
+        base: { ref: "main", repo: { owner: { login: "other" }, name: "rea" } },
+      }),
+    ]);
+    expect((await runReadinessCheck(input))?.state).toBe("pending");
+  });
+
+  it("rejects same-head collisions between main and release PRs in the same base", async () => {
+    const input = fixture();
+    input.paginate.mockResolvedValue([
+      input.pull,
+      makePull({ number: 43, base: { ref: "release/stable" } }),
+    ]);
+    expect((await runReadinessCheck(input))?.state).toBe("failure");
+  });
+
+  it.each([
+    { head: { sha: "a".repeat(40) } },
+    { head: { sha: "a".repeat(40), repo: null } },
+    {
+      head: {
+        sha: "a".repeat(40),
+        repo: { owner: { login: "wrong/owner" }, name: "rea" },
+      },
+    },
+    {
+      head: {
+        sha: "a".repeat(40),
+        repo: { owner: { login: "contributor" }, name: "../rea" },
+      },
+    },
+    { base: { ref: "main" } },
+    { base: { ref: "main", repo: null } },
+    { base: { ref: "main", repo: { owner: { login: "other" }, name: "rea" } } },
+  ])(
+    "keeps missing or invalid repository identity pending (%#)",
+    async (changes) => {
+      const input = fixture();
+      input.get.mockResolvedValue({ data: { ...input.pull, ...changes } });
+      expect((await runReadinessCheck(input))?.state).toBe("pending");
+      expect(input.paginate).not.toHaveBeenCalled();
+      expect(input.core.setFailed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires the associated self to have the actual head repository", async () => {
+    const input = fixture();
+    input.paginate.mockResolvedValue([
+      makePull({
+        head: {
+          sha: input.pull.head.sha,
+          repo: { owner: { login: "other" }, name: "rea" },
+        },
+      }),
+    ]);
+    expect((await runReadinessCheck(input))?.state).toBe("pending");
+  });
+
+  it("does not discard a same-head association whose base identity is missing", async () => {
+    const input = fixture();
+    input.paginate.mockResolvedValue([
+      input.pull,
+      makePull({ number: 43, base: { ref: "main", repo: null } }),
+    ]);
+    expect((await runReadinessCheck(input))?.state).toBe("pending");
+  });
+
+  it.each([
+    {
+      head: {
+        sha: "a".repeat(40),
+        repo: { owner: { login: "other" }, name: "rea" },
+      },
+    },
+    { base: { ref: "main", repo: { owner: { login: "other" }, name: "rea" } } },
+  ])(
+    "does not publish stale success after repository identity changes (%#)",
+    async (changes) => {
+      const input = fixture();
+      input.get
+        .mockResolvedValueOnce({ data: input.pull })
+        .mockResolvedValueOnce({ data: makePull(changes) });
+      expect((await runReadinessCheck(input))?.state).toBe("pending");
+      expect(input.createCommitStatus).toHaveBeenLastCalledWith(
+        expect.objectContaining({ state: "pending" }),
+      );
+    },
+  );
+});
 
 it("executes the production workflow step with trusted code and status-only write authority", async () => {
   const workflow = await readWorkflow();

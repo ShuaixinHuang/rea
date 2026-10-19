@@ -1,10 +1,20 @@
+interface ReadinessRepository {
+  readonly name: string;
+  readonly owner: { readonly login: string };
+}
 export interface ReadinessPullRequest {
   readonly number: number;
   readonly state: "open" | "closed";
   readonly draft: boolean;
   readonly body: string | null;
-  readonly head: { readonly sha: string };
-  readonly base: { readonly ref: string };
+  readonly head: {
+    readonly sha: string;
+    readonly repo?: ReadinessRepository | null;
+  };
+  readonly base: {
+    readonly ref: string;
+    readonly repo?: ReadinessRepository | null;
+  };
 }
 export interface ReadinessResult {
   readonly state: "success" | "failure" | "pending";
@@ -41,7 +51,7 @@ export interface ReadinessGitHub {
       per_page: number;
     },
   ): Promise<
-    readonly Pick<ReadinessPullRequest, "number" | "state" | "head">[]
+    readonly Pick<ReadinessPullRequest, "number" | "state" | "head" | "base">[]
   >;
 }
 export function evaluateReadiness(

@@ -2,6 +2,29 @@ import { readFile } from "node:fs/promises";
 
 const result = (state, description) => ({ state, description });
 
+const repositoryIdentity = (repository) => {
+  const owner = repository?.owner?.login;
+  const repo = repository?.name;
+  return typeof owner === "string" &&
+    /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/iu.test(owner) &&
+    typeof repo === "string" &&
+    /^[a-z\d_.-]+$/iu.test(repo) &&
+    repo !== "." &&
+    repo !== ".."
+    ? { owner, repo }
+    : undefined;
+};
+
+const repositoryKey = (repository) =>
+  repository === undefined
+    ? undefined
+    : `${repository.owner}/${repository.repo}`.toLowerCase();
+
+const sameRepository = (left, right) =>
+  left !== undefined &&
+  right !== undefined &&
+  repositoryKey(left) === repositoryKey(right);
+
 function readinessLines(markdown) {
   const lines = markdown.split(/\r?\n/u);
   const visible = [];
@@ -105,6 +128,8 @@ export async function runReadinessCheck({ github, context, core }) {
   const getPull = async () =>
     (await github.rest.pulls.get({ ...repository, pull_number: number })).data;
   const pull = await getPull();
+  const headRepository = repositoryIdentity(pull.head.repo);
+  const baseRepository = repositoryIdentity(pull.base.repo);
   if (pull.state !== "open" || !/^(?:main|release\/.+)$/u.test(pull.base.ref))
     return;
   const publish = (sha, verdict) =>
@@ -125,34 +150,54 @@ export async function runReadinessCheck({ github, context, core }) {
   );
   let verdict = evaluateReadiness(pull, template);
   if (verdict.state === "success") {
-    const associated = await github.paginate(
-      github.rest.repos.listPullRequestsAssociatedWithCommit,
-      { ...repository, commit_sha: pull.head.sha, per_page: 100 },
-    );
     if (
-      !associated.some(
-        (other) =>
-          other.number === number &&
-          other.state === "open" &&
-          other.head.sha === pull.head.sha,
-      )
+      headRepository === undefined ||
+      !sameRepository(baseRepository, repository)
     )
       verdict = result(
         "pending",
-        "GitHub has not confirmed this PR's head association; rerun PR readiness.",
+        "GitHub has not confirmed this PR's repository identity; rerun PR readiness.",
       );
-    else if (
-      associated.some(
-        (other) =>
-          other.state === "open" &&
-          other.number !== number &&
-          other.head.sha === pull.head.sha,
+    else {
+      const associated = await github.paginate(
+        github.rest.repos.listPullRequestsAssociatedWithCommit,
+        { ...headRepository, commit_sha: pull.head.sha, per_page: 100 },
+      );
+      const sameBase = associated.filter((other) =>
+        sameRepository(repositoryIdentity(other.base?.repo), repository),
+      );
+      if (
+        associated.some(
+          (other) =>
+            other.state === "open" &&
+            other.head.sha === pull.head.sha &&
+            repositoryIdentity(other.base?.repo) === undefined,
+        ) ||
+        !sameBase.some(
+          (other) =>
+            other.number === number &&
+            other.state === "open" &&
+            other.head.sha === pull.head.sha &&
+            sameRepository(repositoryIdentity(other.head.repo), headRepository),
+        )
       )
-    )
-      verdict = result(
-        "failure",
-        "Open PRs must have distinct head commits because GitHub shares commit statuses.",
-      );
+        verdict = result(
+          "pending",
+          "GitHub has not confirmed this PR's head association; rerun PR readiness.",
+        );
+      else if (
+        sameBase.some(
+          (other) =>
+            other.state === "open" &&
+            other.number !== number &&
+            other.head.sha === pull.head.sha,
+        )
+      )
+        verdict = result(
+          "failure",
+          "Open PRs must have distinct head commits because GitHub shares commit statuses.",
+        );
+    }
   }
   const latest = await getPull();
   if (latest.state !== "open") return;
@@ -160,7 +205,11 @@ export async function runReadinessCheck({ github, context, core }) {
     latest.head.sha !== pull.head.sha ||
     latest.body !== pull.body ||
     latest.draft !== pull.draft ||
-    latest.base.ref !== pull.base.ref
+    latest.base.ref !== pull.base.ref ||
+    repositoryKey(repositoryIdentity(latest.head.repo)) !==
+      repositoryKey(headRepository) ||
+    repositoryKey(repositoryIdentity(latest.base.repo)) !==
+      repositoryKey(baseRepository)
   )
     verdict = result(
       "pending",
