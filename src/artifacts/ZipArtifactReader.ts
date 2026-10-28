@@ -513,6 +513,12 @@ const typedZipFailure = (
   // Only method 93 uses Node's native Zstandard decoder. Do not classify
   // cancellation or an unrelated codec/runtime error as malformed ZIP data.
   const code = "code" in cause ? cause.code : undefined;
+  if (compressionMethod === 93 && code === "ZSTD_error_dictionary_wrong")
+    return new ArtifactReaderFailure(
+      "unavailable",
+      "ZIP archive uses an unsupported Zstandard dictionary",
+      { cause },
+    );
   const invalidZstandard =
     compressionMethod === 93 &&
     (code === "ZSTD_error_prefix_unknown" ||

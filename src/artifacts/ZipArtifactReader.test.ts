@@ -26,6 +26,7 @@ import { openRegularFile } from "../filesystem/RegularFile.js";
 import { MINIMUM_ARTIFACT_EXPANDED_BYTES } from "../domain/artifactExpansionBudget.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import { hashReadable } from "./ArtifactHash.js";
+import { translateArtifactFailure } from "./ArtifactOperationFailure.js";
 
 /** Small real ZIP carriers with forged sizes; metadata-only controls, never decompressed. */
 const writeZipWithDeclaredSize = async (
@@ -201,6 +202,25 @@ describe("ZIP Zstandard method 93", () => {
       message: expect.stringContaining("Invalid compressed data"),
       cause: { code: "ZSTD_error_checksum_wrong" },
     });
+  });
+
+  it("reports a required Zstandard dictionary as unavailable", async () => {
+    const compressed = Buffer.from("28b52ffd210100010000", "hex");
+    const failure = await read(
+      zstandardZipFixture(Buffer.alloc(0), { compressed }),
+    ).catch((cause: unknown) => cause);
+    expect(failure).toMatchObject({
+      name: "ArtifactReaderFailure",
+      reason: "unavailable",
+      message: expect.stringContaining("Zstandard dictionary"),
+      cause: { code: "ZSTD_error_dictionary_wrong" },
+    });
+    expect(translateArtifactFailure("extract_artifact", failure)).toMatchObject(
+      {
+        reason: "unavailable",
+        detail: expect.stringContaining("Zstandard dictionary"),
+      },
+    );
   });
 
   it.each([
