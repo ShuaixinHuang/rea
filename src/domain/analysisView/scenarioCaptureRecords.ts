@@ -51,10 +51,14 @@ const headerValue = (
   name: string,
 ): string | undefined => {
   if (headers?.state !== "captured") return undefined;
-  const item = headers.items.find(
-    (candidate) => candidate.name.toLowerCase() === name,
-  );
-  return item?.value ?? undefined;
+  const values = headers.items
+    .filter((candidate) => candidate.name.toLowerCase() === name)
+    .map((candidate) => candidate.value);
+  if (values.length === 0 || values.some((value) => value === null))
+    return undefined;
+  const [first] = values;
+  if (first === null || first === undefined) return undefined;
+  return values.every((value) => value === first) ? first : undefined;
 };
 
 const captured = (
@@ -192,7 +196,7 @@ const record = (
   const requestContent = onlyContent(index, request.sequence);
   const responseContent = onlyContent(index, response?.sequence);
   const body = retainedBody(responseContent);
-  const mimeType = scenarioContentMediaType(responseContent) ?? "";
+  const mimeType = scenarioContentMediaType(responseContent);
   return {
     record: {
       ordinal,
@@ -205,10 +209,12 @@ const record = (
           : {
               response: {
                 status: response.status,
-                content:
-                  body === undefined
-                    ? { mimeType }
-                    : { mimeType, text: body.content, encoding: "base64" },
+                content: {
+                  ...(mimeType === undefined ? {} : { mimeType }),
+                  ...(body === undefined
+                    ? {}
+                    : { text: body.content, encoding: "base64" }),
+                },
               },
             }),
       },

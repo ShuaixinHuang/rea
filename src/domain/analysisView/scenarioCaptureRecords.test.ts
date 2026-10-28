@@ -9,6 +9,7 @@ import {
 import {
   admitScenarioCaptureParent,
   scenarioCaptureRecords,
+  scenarioContentMediaType,
 } from "./scenarioCaptureRecords.js";
 import { EnvironmentManifestAccumulator } from "./EnvironmentManifestAccumulator.js";
 
@@ -159,6 +160,67 @@ describe("scenarioCaptureRecords", () => {
       ]),
     );
   });
+});
+
+it("withholds conflicting duplicate response content types instead of guessing", () => {
+  const capture = scenarioCaptureFixture([SCENARIO_EXCHANGES[1]!]);
+  const duplicated = {
+    ...capture,
+    events: {
+      ...capture.events,
+      items: capture.events.items.map((event) =>
+        event.kind === "network-content" && event.phase === "response"
+          ? {
+              ...event,
+              body: { ...event.body, media_type: null },
+              headers: {
+                state: "captured" as const,
+                items: [
+                  {
+                    name: "content-type",
+                    value: "application/json",
+                    redacted: false,
+                  },
+                  {
+                    name: "Content-Type",
+                    value: "application/octet-stream",
+                    redacted: false,
+                  },
+                ],
+              },
+            }
+          : event,
+      ),
+    },
+  };
+  const content = duplicated.events.items.find(
+    (event) => event.kind === "network-content" && event.phase === "response",
+  );
+  if (content?.kind !== "network-content")
+    throw new Error("Missing response content");
+  expect(scenarioContentMediaType(content)).toBeUndefined();
+  const projected = scenarioCaptureRecords(duplicated, "manifest");
+  expect(projected.records[0]?.reported).toMatchObject({
+    request: {
+      method: "GET",
+      url: "http://127.0.0.1:3101/api/users/2",
+      bodySize: -1,
+    },
+    response: { status: 200 },
+  });
+  expect(projected.records[0]?.reported).not.toHaveProperty(
+    "response.content.mimeType",
+  );
+});
+
+it("retains one agreed value from repeated response content types", () => {
+  const capture = scenarioCaptureFixture([SCENARIO_EXCHANGES[1]!]);
+  const content = capture.events.items.find(
+    (event) => event.kind === "network-content" && event.phase === "response",
+  );
+  if (content?.kind !== "network-content")
+    throw new Error("Missing response content");
+  expect(scenarioContentMediaType(content)).toBe("application/json");
 });
 
 it("reserves retained request-body expansion before schema decoding or projection", () => {
