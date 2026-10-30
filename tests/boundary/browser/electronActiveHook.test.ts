@@ -3386,6 +3386,47 @@ console.log(JSON.stringify({ calls, returned, sameThrow, borrowed,
   });
 });
 
+it("delivers revoked proxy rejections to the application's original handler", async () => {
+  const root = await createTestTempDirectory(
+    "rea-electron-hook-revoked-rejection-",
+  );
+  temporary.push(root);
+  await writeElectronFixture(root);
+  const script = join(root, "revoked-rejections.cjs");
+  await writeFile(
+    script,
+    `const entries = [{}, [], () => undefined, []].map((target, index) => {
+  const { proxy, revoke } = Proxy.revocable(target, {});
+  if (index < 3) revoke();
+  return { reason: proxy, promise: undefined };
+});
+const received = [];
+process.on("unhandledRejection", (reason, promise) => {
+  received.push(entries.some(entry => entry.reason === reason && entry.promise === promise));
+});
+for (const entry of entries) entry.promise = Promise.reject(entry.reason);
+setImmediate(() => console.log(JSON.stringify({
+  received,
+  listeners: process.listenerCount("unhandledRejection"),
+  shapes: globalThis.__reaElectronActiveSnapshot().events.filter(event =>
+    event.kind === "process-lifecycle" && event.event === "unhandled-rejection").map(event => event.argument_shapes),
+})));
+`,
+  );
+  const result = await runNode(script, root);
+  expect(result.code, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({
+    received: [true, true, true, true],
+    listeners: 1,
+    shapes: [
+      ["object", "object"],
+      ["object", "object"],
+      ["function", "object"],
+      ["array", "object"],
+    ],
+  });
+});
+
 it("preserves an Electron-style uncaught exception listener policy", async () => {
   const root = await createTestTempDirectory(
     "rea-electron-hook-uncaught-policy-",

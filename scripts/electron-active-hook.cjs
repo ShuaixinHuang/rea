@@ -77,7 +77,6 @@ let correlationSequence = 0;
 
 const shape = (value, depth = 0) => {
   if (depth > 2 || value === null) return value === null ? "null" : "nested";
-  if (arrayIsArray(value)) return "array";
   switch (typeof value) {
     case "string":
       return "string";
@@ -90,7 +89,12 @@ const shape = (value, depth = 0) => {
     case "function":
       return "function";
     case "object":
-      return "object";
+      try {
+        return arrayIsArray(value) ? "array" : "object";
+      } catch {
+        // Revoked proxies retain their typeof identity but reject IsArray.
+        return "object";
+      }
     default:
       return "unknown";
   }
