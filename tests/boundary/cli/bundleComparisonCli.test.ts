@@ -1,4 +1,3 @@
-import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +12,7 @@ import {
   createEvidenceBundle,
   serializeEvidenceBundle,
 } from "../../../src/domain/evidenceBundle.js";
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 
@@ -229,6 +229,7 @@ cliTest(
             expect.objectContaining({
               path: [rejectedField],
               reason: "invalid_format",
+              expected: "regex",
             }),
           ]),
         },

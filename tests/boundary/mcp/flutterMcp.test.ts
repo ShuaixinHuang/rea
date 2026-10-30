@@ -1,4 +1,3 @@
-import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { expect, it, onTestFinished } from "vitest";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -11,7 +10,11 @@ import { ok } from "../../../src/domain/result.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createFlutterBuildAnalysisProvider } from "../../../src/composition/flutter.js";
-import { flutterResultSchemas } from "../../../src/domain/flutter/flutterBuildAnalysis.js";
+import {
+  ABI_SELECTOR_MESSAGE,
+  flutterResultSchemas,
+} from "../../../src/domain/flutter/flutterBuildAnalysis.js";
+import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { aotFixtureImage } from "../../../src/flutter/FlutterBuild.fixture.js";
 import { createFlutterApk } from "../../fixtures/flutterApk.js";
 import { createApplicationMcpHarness } from "../../fixtures/applicationMcpHarness.js";
@@ -261,9 +264,13 @@ it("advertises and enforces the same Unicode selector grammar through MCP", asyn
       category: "invalid_input",
       details: {
         operation: "inspect_dart_aot",
-        issues: expect.arrayContaining([
-          expect.objectContaining({ path: ["abi"], reason }),
-        ]),
+        issues: [
+          expect.objectContaining({
+            path: ["abi"],
+            reason,
+            message: ABI_SELECTOR_MESSAGE,
+          }),
+        ],
       },
     });
   }
