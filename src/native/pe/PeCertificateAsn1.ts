@@ -193,9 +193,11 @@ const decodeDirectoryString = (
       return decoded;
     }
     case 0x16:
+      chargeDecodedName(budget, node.content.length);
       if (node.content.some((byte) => byte > 0x7f))
         return fail("IA5String holds a non-ASCII character.");
-      return decodeUtf8(node.content, budget);
+      // Validated ASCII needs no UTF-8 round trip or second budget charge.
+      return node.content.toString("ascii");
     case 0x0c:
     case 0x17:
     case 0x18:

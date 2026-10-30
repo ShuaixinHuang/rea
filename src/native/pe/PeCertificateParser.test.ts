@@ -870,6 +870,33 @@ it.each([
   },
 );
 
+it("bounds IA5String inspection before alphabet validation and charges text once", () => {
+  const ascii = Buffer.alloc(Math.floor(MAX_DECODED_NAME_BYTES / 3), 0x41);
+  const within = directoryName(der(0x16, ascii));
+  const certificate = parseCertificate(
+    readAsn1(namedCertificate(within, within)),
+  );
+  expect(certificate.issuer.attributes[0]?.value).toBe(ascii.toString("ascii"));
+  expect(certificate.subject.attributes[0]?.value).toBe(
+    ascii.toString("ascii"),
+  );
+  for (const ending of [Buffer.from("A"), Buffer.from("é")]) {
+    const oversized = Buffer.concat([
+      Buffer.alloc(MAX_DECODED_NAME_BYTES, 0x41),
+      ending,
+    ]);
+    const parseOversized = () =>
+      parseCertificate(
+        readAsn1(namedCertificate(directoryName(der(0x16, oversized)), within)),
+      );
+    expect(parseOversized).toThrow(
+      expect.objectContaining({
+        exhausted: { allowance: "decoded-text", limit: MAX_DECODED_NAME_BYTES },
+      }),
+    );
+  }
+});
+
 it.each([
   [0x13, "AZaz09 '()+,-./:=?"],
   [0x16, "mail_box@example.test\u0000\t\u007f"],
