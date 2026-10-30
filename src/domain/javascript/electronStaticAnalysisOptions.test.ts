@@ -295,6 +295,46 @@ it("resolves a hoisted window function called after module initialization", () =
   });
 });
 
+it.each([
+  "for (const item of [0])",
+  "for (let index = 0; index < 1; index++)",
+  "while (true)",
+])(
+  "keeps function initialization coverage separate from %s ordering",
+  (loop) => {
+    const source = (early: boolean) => `
+    const { BrowserWindow } = require("electron");
+    ${early ? "createWindow();" : ""}
+    const webPreferences = { nodeIntegration: true };
+    function createWindow() {
+      ${loop} {
+        return new BrowserWindow({ webPreferences });
+      }
+    }
+    ${early ? "" : "createWindow();"}
+  `;
+    const runtime = () => ({ require: () => ({ BrowserWindow: class {} }) });
+    expect(() => runInNewContext(source(false), runtime())).not.toThrow();
+    expect(
+      analyzeJavaScriptStaticSource(source(false)).electron.browser_windows[0],
+    ).toMatchObject({
+      web_preferences_status: "object-literal",
+      web_preferences: [
+        { name: "nodeIntegration", value: { status: "literal", value: true } },
+      ],
+    });
+    expect(() => runInNewContext(source(true), runtime())).toThrow(
+      /before initialization/,
+    );
+    expect(
+      analyzeJavaScriptStaticSource(source(true)).electron.browser_windows[0],
+    ).toMatchObject({
+      web_preferences_status: "dynamic",
+      web_preferences: [],
+    });
+  },
+);
+
 describe("Electron option evidence", () => {
   it.each([
     '({ webPreferences: { preload: "./preload.js", sandbox: true } } as const)',

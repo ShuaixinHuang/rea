@@ -30,7 +30,6 @@ interface StatementPosition {
 interface BindingReadPosition {
   readonly position: StatementPosition | null;
   readonly repeatingLoop: t.Loop | undefined;
-  readonly enclosingFunction: t.Function | undefined;
 }
 
 interface ExpressionSiblings {
@@ -56,6 +55,7 @@ interface InitializerPositionCache {
   readonly mutation: WeakMap<t.Node, StatementPosition | null>;
   readonly reference: WeakMap<t.Node, StatementPosition | null>;
   readonly read: WeakMap<t.Node, BindingReadPosition>;
+  readonly enclosingFunction: WeakMap<t.Node, t.Function | null>;
   readonly moduleFunctionReads: WeakMap<
     readonly t.Statement[],
     WeakMap<t.FunctionDeclaration, number | null>
@@ -84,6 +84,7 @@ const initializerPositionCache = (
     mutation: new WeakMap(),
     reference: new WeakMap(),
     read: new WeakMap(),
+    enclosingFunction: new WeakMap(),
     moduleFunctionReads: new WeakMap(),
     evaluationChildren: new WeakMap(),
     expressionAncestry: undefined,
@@ -716,6 +717,35 @@ export const semanticMutationInitializers = (
   };
 };
 
+/** Function ownership is independent of uncertain ordering within a loop. */
+const bindingEnclosingFunction = (
+  read: t.Node,
+  parents: WeakMap<t.Node, t.Node>,
+): t.Function | undefined => {
+  const cache = initializerPositionCache(parents).enclosingFunction;
+  const path: t.Node[] = [];
+  let current = read;
+  let result: t.Function | null = null;
+  while (true) {
+    const cached = cache.get(current);
+    if (cached !== undefined) {
+      result = cached;
+      break;
+    }
+    path.push(current);
+    const parent = parents.get(current);
+    if (parent === undefined || delayedInstanceFieldValue(parent, current))
+      break;
+    if (t.isFunction(parent) && !semanticComputedMethodKey(parent, current)) {
+      if (current === parent.body) result = parent;
+      break;
+    }
+    current = parent;
+  }
+  for (const node of path) cache.set(node, result);
+  return result ?? undefined;
+};
+
 /** Reuse immutable ancestry facts across reads nested in the same expression. */
 const bindingReadPosition = (
   read: t.Node,
@@ -734,11 +764,7 @@ const bindingReadPosition = (
     path.push(current);
     const parent = parents.get(current);
     if (t.isLoop(parent)) {
-      result = {
-        position: null,
-        repeatingLoop: parent,
-        enclosingFunction: undefined,
-      };
+      result = { position: null, repeatingLoop: parent };
       break;
     }
     if (
@@ -746,12 +772,7 @@ const bindingReadPosition = (
       (t.isFunction(parent) && !semanticComputedMethodKey(parent, current)) ||
       delayedInstanceFieldValue(parent, current)
     ) {
-      result = {
-        position: null,
-        repeatingLoop: undefined,
-        enclosingFunction:
-          t.isFunction(parent) && current === parent.body ? parent : undefined,
-      };
+      result = { position: null, repeatingLoop: undefined };
       break;
     }
     current = parent;
@@ -944,10 +965,7 @@ export const semanticBindingAtRead = (
         ? null
         : initializerPosition(reference, parents, true)
       : initializerPosition(initializer, parents);
-  const { position, repeatingLoop, enclosingFunction } = bindingReadPosition(
-    read,
-    parents,
-  );
+  const { position, repeatingLoop } = bindingReadPosition(read, parents);
   // Coverage and latest-value selection are independent. A preceding write
   // can cover entry even when another write's order remains unknown.
   const hasDefiniteInitializer =
@@ -980,6 +998,14 @@ export const semanticBindingAtRead = (
       binding,
       hasDefiniteInitializer,
     };
+  const moduleConstBinding =
+    binding.scopeId.startsWith("scope:program:") &&
+    binding.declarationKinds.size === 1 &&
+    binding.declarationKinds.has("const") &&
+    !binding.mutable;
+  const enclosingFunction = moduleConstBinding
+    ? bindingEnclosingFunction(read, parents)
+    : undefined;
   const functionStatementPosition = (): StatementPosition | null => {
     if (enclosingFunction === undefined) return null;
     if (t.isStatement(enclosingFunction))
@@ -992,11 +1018,6 @@ export const semanticBindingAtRead = (
       if (t.isStatement(owner)) return statementPosition(owner, parents);
     return null;
   };
-  const moduleConstBinding =
-    binding.scopeId.startsWith("scope:program:") &&
-    binding.declarationKinds.size === 1 &&
-    binding.declarationKinds.has("const") &&
-    !binding.mutable;
   const functionPosition = moduleConstBinding
     ? functionStatementPosition()
     : null;
