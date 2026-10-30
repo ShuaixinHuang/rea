@@ -920,13 +920,20 @@ export const semanticBindingAtRead = (
     }
     return null;
   };
-  const functionPosition = functionStatementPosition();
+  const moduleConstBinding =
+    binding.scopeId.startsWith("scope:program:") &&
+    binding.declarationKinds.size === 1 &&
+    binding.declarationKinds.has("const") &&
+    !binding.mutable;
+  const functionPosition = moduleConstBinding
+    ? functionStatementPosition()
+    : null;
   const moduleConstInitializerIsBeforeFunction =
+    moduleConstBinding &&
     sourcePosition !== null &&
     functionPosition !== null &&
     sourcePosition.body === functionPosition.body &&
-    positionPrecedes(sourcePosition, functionPosition) &&
-    binding.scopeId.startsWith("scope:program:");
+    positionPrecedes(sourcePosition, functionPosition);
   const uncertainOrder =
     repeatingLoop ||
     sourcePosition === null ||
