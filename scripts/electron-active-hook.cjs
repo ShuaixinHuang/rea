@@ -1267,20 +1267,25 @@ try {
   boundaries.patchApplicationEffects(electron.app);
   boundaries.patchNativeAddonLoading();
   boundaries.patchChildProcess();
-  process.once("uncaughtException", (cause, origin) => {
-    recordRuntime("process-lifecycle", "uncaught-exception", "observed", {
-      argument_shape_values: [cause, origin],
-      error: true,
-    });
-    throw cause;
-  });
-  process.once("unhandledRejection", (reason, promise) => {
-    recordRuntime("process-lifecycle", "unhandled-rejection", "observed", {
-      argument_shape_values: [reason, promise],
-      error: true,
-    });
-    throw reason;
-  });
+  // Observe dispatch without adding listeners: their presence changes Node's
+  // rejection fallback and Electron's uncaught-exception listener-count policy.
+  const processEmit = process.emit;
+  process.emit = function observedProcessEmit(event, ...args) {
+    if (this === process) {
+      const kind =
+        event === "unhandledRejection"
+          ? "unhandled-rejection"
+          : event === "uncaughtExceptionMonitor"
+            ? "uncaught-exception"
+            : null;
+      if (kind !== null)
+        recordRuntime("process-lifecycle", kind, "observed", {
+          argument_shape_values: args,
+          error: true,
+        });
+    }
+    return applyFunction(processEmit, this, arguments);
+  };
 } catch (cause) {
   globalThis.__reaElectronActiveHookError = true;
   recordRuntime(
