@@ -940,7 +940,8 @@ export const semanticBindingAtRead = (
     position === null ||
     sourcePosition.body !== position.body;
   if (uncertainOrder && moduleConstInitializerIsBeforeFunction)
-    return { status: "ordered", binding, hasDefiniteInitializer: true };
+    // Initialization coverage does not order a capture in another activation.
+    return { status: "unresolved", binding, hasDefiniteInitializer: true };
   if (uncertainOrder)
     return { status: "unresolved", binding, hasDefiniteInitializer };
   const selected = selectInitializers(binding, position, read, parents);
