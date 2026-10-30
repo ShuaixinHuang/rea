@@ -897,11 +897,43 @@ export const semanticBindingAtRead = (
       binding,
       hasDefiniteInitializer,
     };
+  const functionStatementPosition = (): StatementPosition | null => {
+    let child: t.Node = read;
+    for (
+      let parent = parents.get(child);
+      parent !== undefined;
+      child = parent, parent = parents.get(parent)
+    ) {
+      if (
+        t.isFunction(parent) &&
+        (child === parent.body || semanticComputedMethodKey(parent, child))
+      ) {
+        if (t.isStatement(parent)) return statementPosition(parent, parents);
+        for (
+          let owner = parents.get(parent);
+          owner !== undefined;
+          owner = parents.get(owner)
+        )
+          if (t.isStatement(owner)) return statementPosition(owner, parents);
+        return null;
+      }
+    }
+    return null;
+  };
+  const functionPosition = functionStatementPosition();
+  const moduleConstInitializerIsBeforeFunction =
+    sourcePosition !== null &&
+    functionPosition !== null &&
+    sourcePosition.body === functionPosition.body &&
+    positionPrecedes(sourcePosition, functionPosition) &&
+    binding.scopeId.startsWith("scope:program:");
   const uncertainOrder =
     repeatingLoop ||
     sourcePosition === null ||
     position === null ||
     sourcePosition.body !== position.body;
+  if (uncertainOrder && moduleConstInitializerIsBeforeFunction)
+    return { status: "ordered", binding, hasDefiniteInitializer: true };
   if (uncertainOrder)
     return { status: "unresolved", binding, hasDefiniteInitializer };
   const selected = selectInitializers(binding, position, read, parents);

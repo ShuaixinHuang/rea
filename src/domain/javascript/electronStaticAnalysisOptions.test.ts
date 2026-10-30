@@ -200,6 +200,44 @@ describe("Electron option captures and initialization", () => {
   });
 });
 
+it("resolves module-level webPreferences used inside a function", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+      const { BrowserWindow } = require("electron");
+      const webPreferences = { nodeIntegration: true, contextIsolation: false };
+      function createWindow() {
+        return new BrowserWindow({ width: 800, webPreferences });
+      }
+      createWindow();
+    `);
+  const window = analysis.electron.browser_windows[0];
+  expect(window?.web_preferences_status).toBe("object-literal");
+  expect(window?.web_preferences).toEqual(
+    expect.arrayContaining([
+      {
+        name: "nodeIntegration",
+        value: expect.objectContaining({ status: "literal", value: true }),
+      },
+      {
+        name: "contextIsolation",
+        value: expect.objectContaining({ status: "literal", value: false }),
+      },
+    ]),
+  );
+});
+it("keeps a module-level option unresolved when called before initialization", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+      const { BrowserWindow } = require("electron");
+      function createWindow() {
+        return new BrowserWindow({ webPreferences });
+      }
+      createWindow();
+      const webPreferences = { nodeIntegration: true };
+    `);
+  expect(analysis.electron.browser_windows[0]).toMatchObject({
+    web_preferences_status: "dynamic",
+    web_preferences: [],
+  });
+});
 describe("Electron option evidence", () => {
   it.each([
     '({ webPreferences: { preload: "./preload.js", sandbox: true } } as const)',
