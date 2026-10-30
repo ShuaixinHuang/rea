@@ -238,6 +238,63 @@ it("keeps a module-level option unresolved when called before initialization", (
     web_preferences: [],
   });
 });
+it.each([
+  { label: "a direct call", before: "createWindow();", after: "" },
+  {
+    label: "an aliased call",
+    before: "const early = createWindow; early();",
+    after: "",
+  },
+  {
+    label: "a forwarding function",
+    before: "start();",
+    after: "function start() { createWindow(); }",
+  },
+])(
+  "does not initialize a hoisted window function reached by $label",
+  ({ before, after }) => {
+    const source = `
+    const { BrowserWindow } = require("electron");
+    ${before}
+    const webPreferences = { nodeIntegration: true };
+    function createWindow() {
+      return new BrowserWindow({ webPreferences });
+    }
+    ${after}
+  `;
+    expect(() =>
+      runInNewContext(source, {
+        require: () => ({ BrowserWindow: class {} }),
+      }),
+    ).toThrow(/before initialization/);
+    expect(
+      analyzeJavaScriptStaticSource(source).electron.browser_windows[0],
+    ).toMatchObject({
+      web_preferences_status: "dynamic",
+      web_preferences: [],
+    });
+  },
+);
+
+it("resolves a hoisted window function called after module initialization", () => {
+  const source = `
+    const { BrowserWindow } = require("electron");
+    function createWindow() {
+      return new BrowserWindow({ webPreferences });
+    }
+    const webPreferences = { nodeIntegration: true };
+    createWindow();
+  `;
+  expect(
+    analyzeJavaScriptStaticSource(source).electron.browser_windows[0],
+  ).toMatchObject({
+    web_preferences_status: "object-literal",
+    web_preferences: [
+      { name: "nodeIntegration", value: { status: "literal", value: true } },
+    ],
+  });
+});
+
 describe("Electron option evidence", () => {
   it.each([
     '({ webPreferences: { preload: "./preload.js", sandbox: true } } as const)',

@@ -1,4 +1,5 @@
 import * as t from "@babel/types";
+import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 
 import {
   delayedInstanceFieldValue,
@@ -29,6 +30,7 @@ interface StatementPosition {
 interface BindingReadPosition {
   readonly position: StatementPosition | null;
   readonly repeatingLoop: t.Loop | undefined;
+  readonly enclosingFunction: t.Function | undefined;
 }
 
 interface ExpressionSiblings {
@@ -54,6 +56,10 @@ interface InitializerPositionCache {
   readonly mutation: WeakMap<t.Node, StatementPosition | null>;
   readonly reference: WeakMap<t.Node, StatementPosition | null>;
   readonly read: WeakMap<t.Node, BindingReadPosition>;
+  readonly moduleFunctionReads: WeakMap<
+    readonly t.Statement[],
+    WeakMap<t.FunctionDeclaration, number | null>
+  >;
   readonly evaluationChildren: WeakMap<
     t.Node,
     ReadonlyMap<t.Node, number> | null
@@ -78,6 +84,7 @@ const initializerPositionCache = (
     mutation: new WeakMap(),
     reference: new WeakMap(),
     read: new WeakMap(),
+    moduleFunctionReads: new WeakMap(),
     evaluationChildren: new WeakMap(),
     expressionAncestry: undefined,
   };
@@ -727,7 +734,11 @@ const bindingReadPosition = (
     path.push(current);
     const parent = parents.get(current);
     if (t.isLoop(parent)) {
-      result = { position: null, repeatingLoop: parent };
+      result = {
+        position: null,
+        repeatingLoop: parent,
+        enclosingFunction: undefined,
+      };
       break;
     }
     if (
@@ -735,7 +746,12 @@ const bindingReadPosition = (
       (t.isFunction(parent) && !semanticComputedMethodKey(parent, current)) ||
       delayedInstanceFieldValue(parent, current)
     ) {
-      result = { position: null, repeatingLoop: undefined };
+      result = {
+        position: null,
+        repeatingLoop: undefined,
+        enclosingFunction:
+          t.isFunction(parent) && current === parent.body ? parent : undefined,
+      };
       break;
     }
     current = parent;
@@ -796,6 +812,70 @@ type SemanticBindingRead = {
   readonly hasDefiniteInitializer: boolean;
   /** Unresolved reads retain all possible origins for conservative alias effects. */
   readonly binding: JavaScriptSemanticBindingState;
+};
+
+/** A hoisted function needs a module-level use after initialization, not a later declaration. */
+const moduleFunctionFirstRead = (
+  declaration: t.FunctionDeclaration,
+  body: readonly t.Statement[],
+  parents: WeakMap<t.Node, t.Node>,
+): number | null => {
+  const cache = initializerPositionCache(parents).moduleFunctionReads;
+  let reads = cache.get(body);
+  if (reads === undefined) {
+    reads = new WeakMap();
+    cache.set(body, reads);
+    const functions = new Map<string, t.FunctionDeclaration | null>();
+    for (const statement of body) {
+      const exported =
+        t.isExportNamedDeclaration(statement) ||
+        t.isExportDefaultDeclaration(statement);
+      const node = exported ? statement.declaration : statement;
+      if (!t.isFunctionDeclaration(node)) continue;
+      reads.set(node, exported ? null : Infinity);
+      if (node.id == null) continue;
+      const name = node.id.name;
+      if (functions.has(name)) {
+        const previous = functions.get(name);
+        if (previous != null) reads.set(previous, null);
+        reads.set(node, null);
+        functions.set(name, null);
+      } else functions.set(name, node);
+    }
+    const indexedReads = reads;
+    const active = new Set<t.Function>();
+    for (let index = 0; index < body.length; index++) {
+      const statement = body[index];
+      if (statement === undefined) continue;
+      traverseJavaScriptAst(statement, {
+        enter(node, parent) {
+          if (t.isFunction(node)) active.add(node);
+          if (
+            !t.isIdentifier(node) ||
+            parent === null ||
+            !t.isReferenced(node, parent)
+          )
+            return;
+          const fn = functions.get(node.name);
+          if (fn == null || active.has(fn)) return;
+          const current = indexedReads.get(fn);
+          if (current === null || current === undefined) return;
+          // Indirect activations and live exports have no proven module timing.
+          indexedReads.set(
+            fn,
+            active.size > 0 || t.isExportSpecifier(parent)
+              ? null
+              : Math.min(current, index),
+          );
+        },
+        exit(node) {
+          if (t.isFunction(node)) active.delete(node);
+        },
+      });
+    }
+  }
+  const first = reads.get(declaration);
+  return first !== undefined && Number.isFinite(first) ? first : null;
 };
 
 export const semanticBindingAtRead = (
@@ -864,7 +944,10 @@ export const semanticBindingAtRead = (
         ? null
         : initializerPosition(reference, parents, true)
       : initializerPosition(initializer, parents);
-  const { position, repeatingLoop } = bindingReadPosition(read, parents);
+  const { position, repeatingLoop, enclosingFunction } = bindingReadPosition(
+    read,
+    parents,
+  );
   // Coverage and latest-value selection are independent. A preceding write
   // can cover entry even when another write's order remains unknown.
   const hasDefiniteInitializer =
@@ -898,26 +981,15 @@ export const semanticBindingAtRead = (
       hasDefiniteInitializer,
     };
   const functionStatementPosition = (): StatementPosition | null => {
-    let child: t.Node = read;
+    if (enclosingFunction === undefined) return null;
+    if (t.isStatement(enclosingFunction))
+      return statementPosition(enclosingFunction, parents);
     for (
-      let parent = parents.get(child);
-      parent !== undefined;
-      child = parent, parent = parents.get(parent)
-    ) {
-      if (
-        t.isFunction(parent) &&
-        (child === parent.body || semanticComputedMethodKey(parent, child))
-      ) {
-        if (t.isStatement(parent)) return statementPosition(parent, parents);
-        for (
-          let owner = parents.get(parent);
-          owner !== undefined;
-          owner = parents.get(owner)
-        )
-          if (t.isStatement(owner)) return statementPosition(owner, parents);
-        return null;
-      }
-    }
+      let owner = parents.get(enclosingFunction);
+      owner !== undefined;
+      owner = parents.get(owner)
+    )
+      if (t.isStatement(owner)) return statementPosition(owner, parents);
     return null;
   };
   const moduleConstBinding =
@@ -928,18 +1000,28 @@ export const semanticBindingAtRead = (
   const functionPosition = moduleConstBinding
     ? functionStatementPosition()
     : null;
-  const moduleConstInitializerIsBeforeFunction =
+  const firstFunctionRead =
     moduleConstBinding &&
     sourcePosition !== null &&
     functionPosition !== null &&
     sourcePosition.body === functionPosition.body &&
-    positionPrecedes(sourcePosition, functionPosition);
+    t.isFunctionDeclaration(enclosingFunction)
+      ? moduleFunctionFirstRead(enclosingFunction, sourcePosition.body, parents)
+      : null;
+  const moduleConstInitializedBeforeActivation =
+    moduleConstBinding &&
+    sourcePosition !== null &&
+    functionPosition !== null &&
+    sourcePosition.body === functionPosition.body &&
+    (t.isFunctionDeclaration(enclosingFunction)
+      ? firstFunctionRead !== null && sourcePosition.index < firstFunctionRead
+      : positionPrecedes(sourcePosition, functionPosition));
   const uncertainOrder =
     repeatingLoop ||
     sourcePosition === null ||
     position === null ||
     sourcePosition.body !== position.body;
-  if (uncertainOrder && moduleConstInitializerIsBeforeFunction)
+  if (uncertainOrder && moduleConstInitializedBeforeActivation)
     // Initialization coverage does not order a capture in another activation.
     return { status: "unresolved", binding, hasDefiniteInitializer: true };
   if (uncertainOrder)
