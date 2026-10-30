@@ -55,7 +55,9 @@ const artifactKindSchema = z.enum([
 ]);
 
 /** Recognized storage or application formats; unknown bytes remain explicit. */
-const artifactFormatSchema = z.enum([
+export const ARTIFACT_FORMAT_IDS = [
+  "dotnet-bundle",
+  "bun-standalone",
   "dmg",
   "zip",
   "pkg",
@@ -90,8 +92,18 @@ const artifactFormatSchema = z.enum([
   "node-sea",
   "intel-hex",
   "srec",
+  "esp-image",
+  "fit",
   "unknown",
-]);
+] as const;
+
+export type ArtifactFormatId = (typeof ARTIFACT_FORMAT_IDS)[number];
+
+/** Whether a stored format id is one of the recognized artifact formats. */
+export const isArtifactFormatId = (value: string): value is ArtifactFormatId =>
+  (ARTIFACT_FORMAT_IDS as readonly string[]).includes(value);
+
+const artifactFormatSchema = z.enum(ARTIFACT_FORMAT_IDS);
 
 /** Formats established from bytes or a virtual directory tree, independent of path roles. */
 const artifactContentFormatSchema = artifactFormatSchema.extract([
@@ -101,6 +113,8 @@ const artifactContentFormatSchema = artifactFormatSchema.extract([
   "uimage",
   "intel-hex",
   "srec",
+  "esp-image",
+  "fit",
   "mach-o-universal",
   "mach-o",
   "elf",
