@@ -2,7 +2,7 @@ import type { JsonValue } from "../jsonValue.js";
 import { isTimestamp, type DesktopTaskCheckInput } from "./appTask.js";
 import { namesXmlNamespace, resolvePointer } from "./appTaskChecks.js";
 import type { DesktopStatePath } from "./desktopState.js";
-import { diffStateViews } from "./stateChanges.js";
+import { diffStateViews, sqliteRowPrimaryKey } from "./stateChanges.js";
 
 type Version = DesktopStatePath["versions"][number];
 type Suggestion = DesktopTaskCheckInput;
@@ -215,28 +215,28 @@ const rowSuggestions = (
   };
   for (const [name, table] of tableViews(final)) {
     const old = before.get(name) ?? { ...table, rows: [] };
-    const identity = (view: TableView, row: readonly JsonValue[]) =>
-      JSON.stringify(
-        view.key.length === 0
-          ? row
-          : view.key.map((column) => row[view.columns.indexOf(column)] ?? null),
+    const indexRows = (view: TableView) => {
+      const keyColumns = view.key.map((column) => view.columns.indexOf(column));
+      return new Map(
+        view.rows.map((row) => {
+          const key = sqliteRowPrimaryKey(row, keyColumns);
+          return [
+            JSON.stringify(key ?? row),
+            { row, keyed: key !== undefined },
+          ];
+        }),
       );
-    const oldRows = new Map(old.rows.map((row) => [identity(old, row), row]));
-    const newRows = new Map(
-      table.rows.map((row) => [identity(table, row), row]),
-    );
+    };
+    const oldRows = indexRows(old);
+    const newRows = indexRows(table);
     const keyed = (column: string) => table.key.includes(column);
-    for (const [id, row] of newRows) {
-      const previous = oldRows.get(id);
+    for (const [id, { row, keyed: hasKey }] of newRows) {
+      const previous = oldRows.get(id)?.row;
       if (previous === undefined)
         push(
           "row_present",
           name,
-          rowWhere(
-            table,
-            row,
-            (column) => table.key.length === 0 || !keyed(column),
-          ),
+          rowWhere(table, row, (column) => !hasKey || !keyed(column)),
         );
       else if (JSON.stringify(previous) !== JSON.stringify(row))
         push(
@@ -252,17 +252,22 @@ const rowSuggestions = (
           ),
         );
     }
-    for (const [id, row] of oldRows)
-      if (!newRows.has(id))
-        push(
-          "row_absent",
-          name,
-          rowWhere(
-            old,
-            row,
-            (column) => old.key.length === 0 || old.key.includes(column),
-          ),
-        );
+    for (const [id, { row, keyed: hasKey }] of oldRows) {
+      if (newRows.has(id)) continue;
+      const where = rowWhere(
+        old,
+        row,
+        (column) => !hasKey || old.key.includes(column),
+      );
+      // A reduced predicate could match a different surviving NULL-key row.
+      if (
+        !hasKey &&
+        old.key.length > 0 &&
+        Object.keys(where).length !== old.columns.length
+      )
+        continue;
+      push("row_absent", name, where);
+    }
     if (old.rows.length !== table.rows.length)
       suggestions.push({
         kind: "row_count",

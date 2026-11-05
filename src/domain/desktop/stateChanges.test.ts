@@ -82,6 +82,30 @@ describe("diffStateViews", () => {
   });
 });
 
+it("compares NULL primary-key rows by whole row, independent of insertion order", () => {
+  const view = (rows: JsonValue[][]) => ({
+    tables: { items: { columns: ["id", "body"], primary_key: ["id"], rows } },
+  });
+  expect(
+    diffStateViews(
+      "sqlite",
+      view([
+        [null, "alpha"],
+        [null, "beta"],
+      ]),
+      view([
+        [null, "beta"],
+        [null, "alpha"],
+      ]),
+    ),
+  ).toMatchObject({
+    added: [],
+    removed: [],
+    changed: [],
+    complete: true,
+  });
+});
+
 describe("diffStateViews fidelity", () => {
   it("keeps empty containers as values", () => {
     expect(diffStateViews("json", {}, { items: [] })).toMatchObject({

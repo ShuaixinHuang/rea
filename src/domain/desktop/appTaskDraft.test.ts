@@ -121,6 +121,56 @@ describe("draftTaskFiles", () => {
   });
 });
 
+it("does not suggest SQLite edits for reordered NULL keys and retains real changes", () => {
+  const table = (rows: JsonValue[][]) => ({
+    tables: {
+      items: {
+        columns: ["id", "body"],
+        primary_key: ["id"],
+        rows,
+        truncated: false,
+      },
+    },
+  });
+  const file = ".local/share/app/items.db";
+  const before = table([
+    [null, "alpha"],
+    [null, "beta"],
+  ]);
+  const compare = (after: JsonValue) =>
+    draft({ [file]: path("application_state", "sqlite", before, after) })[0]
+      ?.suggested ?? [];
+  expect(
+    compare(
+      table([
+        [null, "beta"],
+        [null, "alpha"],
+      ]),
+    ),
+  ).toEqual([]);
+  expect(
+    compare(
+      table([
+        [null, "gamma"],
+        [null, "beta"],
+      ]),
+    ),
+  ).toEqual([
+    {
+      kind: "row_present",
+      file,
+      table: "items",
+      where: { id: null, body: "gamma" },
+    },
+    {
+      kind: "row_absent",
+      file,
+      table: "items",
+      where: { id: null, body: "alpha" },
+    },
+  ]);
+});
+
 describe("draftTaskFiles for structured views", () => {
   it("suggests key file values by pointer, leaving out times the app stamps", () => {
     const [settings] = draft({
