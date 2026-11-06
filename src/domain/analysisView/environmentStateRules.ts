@@ -745,9 +745,13 @@ export const recordedItemCount = (
   value: JsonValue | undefined,
 ): number | undefined =>
   typeof value === "number"
-    ? value
+    ? Number.isSafeInteger(value) && value >= 0
+      ? value
+      : undefined
     : typeof value === "string" && /^\d+$/u.test(value)
-      ? Number(value)
+      ? Number.isSafeInteger(Number(value))
+        ? Number(value)
+        : undefined
       : undefined;
 
 /** Spell a changed count with the recorded numeric/string type and digit width. */

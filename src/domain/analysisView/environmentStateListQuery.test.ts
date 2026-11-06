@@ -10,7 +10,11 @@ import {
   type QueryLine,
 } from "./environmentStateListQuery.js";
 import { singleQueryValues } from "../recordedTransportUrl.js";
-import type { JsonObject, StateEntity } from "./environmentStateRules.js";
+import {
+  recordedItemCount,
+  type JsonObject,
+  type StateEntity,
+} from "./environmentStateRules.js";
 
 const entity = (fields: JsonObject): StateEntity => ({
   type: "/api/books",
@@ -193,6 +197,12 @@ describe("explaining a recorded line", () => {
       ids("?offset=9007199254740992", { offset: { role: "offset" } }),
     ).toBeUndefined();
     expect(explainLine(line("?offset=unknown", [1, 2, 3, 4]))).toBeUndefined();
+  });
+
+  it("does not turn oversized recorded item counts into Infinity", () => {
+    expect(recordedItemCount("9".repeat(400))).toBeUndefined();
+    expect(recordedItemCount(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(recordedItemCount(-1)).toBeUndefined();
   });
 
   it("keeps a filter that excludes nothing inert, as a flag", () => {
