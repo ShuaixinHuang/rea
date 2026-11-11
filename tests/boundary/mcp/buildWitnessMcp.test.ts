@@ -33,6 +33,7 @@ import {
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { cancelDuringCommit } from "../../fixtures/outputTreeCommit.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { withVerifierCleanup } from "../../../scripts/lib/verifier-cleanup.mjs";
 
 const TASK = {
   name: "add-eggs",
@@ -729,24 +730,41 @@ it("saves a witness record again after a failed save, without checking again", a
   ).toContain("ended");
 });
 
-it("returns the record a witness saved when the computer closes while the save commits", async () => {
+it("retains the published witness in a cancellation when the computer closes during commit", async () => {
   const witness = await witnessed();
   const { client, id, check, directory } = witness;
   await throughNearMiss(witness);
   await witness.act("reset");
   let closed: Promise<unknown> = Promise.resolve();
   cancelDuringCommit(() => {
-    closed = client.callTool({
-      name: "close_build_computer",
-      arguments: { computer_id: id },
+    closed = callOk(client, "close_build_computer", { computer_id: id });
+    // The cleanup below still awaits this exact promise and propagates failure.
+    // Observe rejection immediately, even if a reply assertion fails first.
+    void closed.catch(() => undefined);
+  });
+  await withVerifierCleanup(async () => {
+    const failure = parseMcpToolError(
+      await check({ stage: "after_reset" }),
+    ).error;
+    expect(failure).toMatchObject({
+      category: "cancelled",
+      details: { cleanup: "complete" },
     });
-  });
-  const saved = parsed(await check({ stage: "after_reset" }));
-  expect(saved.witness?.record).toMatchObject({
-    path: join(directory, "witness.json"),
-    verdict: "held",
-  });
-  await closed;
+    const delivered = parseEvidence(failure.details?.partial_observation);
+    const saved = parseEvidence(
+      JSON.parse(await readFile(join(directory, "witness.json"), "utf8")),
+    );
+    expect(delivered).toEqual(saved);
+    expect(saved.normalized_result).toMatchObject({
+      verdict: "held",
+      task: { name: TASK.name },
+      stages: WITNESS_ORDER.map((stage) => expect.objectContaining({ stage })),
+    });
+  }, [
+    async () => {
+      await closed;
+    },
+  ]);
 });
 
 it("returns a record saved as its check was cancelled when that check is asked again", async () => {

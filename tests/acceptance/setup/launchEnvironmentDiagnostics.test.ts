@@ -33,7 +33,7 @@ cliTest(
         environment: { ...environment, ...overrides },
       });
 
-    const absent = await run({ REA_ASAR_MAX_HEADER_BYTES: "0" });
+    const absent = await run({ REA_MCP_INITIALIZE_BUDGET_MS: "0" });
     expect(absent.exitCode).toBe(1);
     expect(absent.json).toMatchObject({
       status: "needs_human",
@@ -41,7 +41,7 @@ cliTest(
       appliedActions: [],
       remediation: expect.stringContaining("launch overrides"),
     });
-    expect(absent.stdout).toContain("REA_ASAR_MAX_HEADER_BYTES");
+    expect(absent.stdout).toContain("REA_MCP_INITIALIZE_BUDGET_MS");
     expect(absent.stdout).not.toContain(
       `Configuration ${config} has an invalid`,
     );
@@ -53,13 +53,13 @@ cliTest(
       },
     });
     await writeFile(config, original);
-    const existing = await run({ REA_BRIDGE_MAX_REQUEST_BYTES: "1" });
+    const existing = await run({ REA_MCP_TOOLS_LIST_BUDGET_MS: "0" });
     expect(existing.exitCode).toBe(1);
     expect(existing.json).toMatchObject({
       status: "needs_human",
       remediation: expect.stringContaining("launch overrides"),
     });
-    expect(existing.stdout).toContain("REA_BRIDGE_MAX_REQUEST_BYTES");
+    expect(existing.stdout).toContain("REA_MCP_TOOLS_LIST_BUDGET_MS");
     expect(await readFile(config, "utf8")).toBe(original);
     await expect(access(`${config}.rea.backup`)).rejects.toMatchObject({
       code: "ENOENT",

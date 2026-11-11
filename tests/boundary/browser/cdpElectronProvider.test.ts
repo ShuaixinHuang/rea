@@ -44,13 +44,18 @@ it.each(["late", "initial", "destroyed", "final-malformed", "out-of-scope"])(
         method === "Page.getFrameTree"
           ? {
               frameTree: {
-                frame: { id: "frame-main", url: mainUrl },
+                frame: {
+                  id: "frame-main",
+                  loaderId: "loader-frame-main",
+                  url: mainUrl,
+                },
                 childFrames:
                   reads > 1 || kind === "initial"
                     ? [
                         {
                           frame: {
                             id: "child",
+                            loaderId: "loader-child",
                             parentId: "frame-main",
                             url:
                               kind === "out-of-scope"
@@ -66,6 +71,7 @@ it.each(["late", "initial", "destroyed", "final-malformed", "out-of-scope"])(
                         {
                           frame: {
                             id: "child",
+                            loaderId: "loader-child",
                             parentId: "frame-main",
                             url: childUrl,
                           },
@@ -168,17 +174,27 @@ it.each(["reordered", "parent-changed", "path-changed"])(
         const first = {
           frame: {
             id: "first",
+            loaderId: "loader-first",
             parentId:
               reads > 2 && kind === "parent-changed" ? "second" : "frame-main",
             url: reads > 2 && kind === "path-changed" ? app : child,
           },
         };
         const second = {
-          frame: { id: "second", parentId: "frame-main", url: app },
+          frame: {
+            id: "second",
+            loaderId: "loader-second",
+            parentId: "frame-main",
+            url: app,
+          },
         };
         return {
           frameTree: {
-            frame: { id: "frame-main", url: main },
+            frame: {
+              id: "frame-main",
+              loaderId: "loader-frame-main",
+              url: main,
+            },
             childFrames: reads > 2 ? [second, first] : [first, second],
           },
         };
@@ -365,11 +381,16 @@ it("excludes srcdoc scripts before source reads while retaining declared labels 
       method === "Page.getFrameTree"
         ? {
             frameTree: {
-              frame: { id: "frame-main", url: mainUrl },
+              frame: {
+                id: "frame-main",
+                loaderId: "loader-frame-main",
+                url: mainUrl,
+              },
               childFrames: [
                 {
                   frame: {
                     id: "srcdoc",
+                    loaderId: "loader-srcdoc",
                     parentId: "frame-main",
                     url: "about:srcdoc",
                   },
@@ -1119,7 +1140,11 @@ it.each(
         method === "Page.getFrameTree"
           ? {
               frameTree: {
-                frame: { id: "frame-main", url: main },
+                frame: {
+                  id: "frame-main",
+                  loaderId: "loader-frame-main",
+                  url: main,
+                },
                 childFrames:
                   phase === "refreshed" && reads === 1
                     ? []
@@ -1127,6 +1152,7 @@ it.each(
                         {
                           frame: {
                             id: "child",
+                            loaderId: "loader-child",
                             url: child,
                             ...(parent === "missing"
                               ? {}
@@ -1136,6 +1162,7 @@ it.each(
                             {
                               frame: {
                                 id: "grandchild",
+                                loaderId: "loader-grandchild",
                                 parentId: "child",
                                 url: child,
                               },
@@ -1240,7 +1267,11 @@ it.each(
         method === "Page.getFrameTree"
           ? {
               frameTree: {
-                frame: { id: "frame-main", url: main },
+                frame: {
+                  id: "frame-main",
+                  loaderId: "loader-frame-main",
+                  url: main,
+                },
                 childFrames:
                   phase === "refreshed" && reads === 1
                     ? []
@@ -1248,6 +1279,7 @@ it.each(
                         {
                           frame: {
                             id: "parent",
+                            loaderId: "loader-parent",
                             parentId: "frame-main",
                             url: parentUrl,
                           },
@@ -1255,6 +1287,7 @@ it.each(
                             {
                               frame: {
                                 id: "local",
+                                loaderId: "loader-local",
                                 parentId: "parent",
                                 url: child,
                               },
@@ -1414,7 +1447,7 @@ const replayFrameTree = (
   reads: number,
 ) => ({
   frameTree: {
-    frame: { id: "frame-main", url: main },
+    frame: { id: "frame-main", url: main, loaderId: "loader-main" },
     childFrames:
       reads === 1 || (kind === "during-tree" && reads === 2)
         ? [
