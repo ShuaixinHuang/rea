@@ -52,23 +52,23 @@ const isDirectRegistration = async (command, cli) =>
   (await realpath(command[1])) === (await realpath(cli));
 
 const verifyMcpAdd = async ({ commands, cli, environment, npxLog, home }) => {
-  await commands.run(cli, ["mcp", "add"], environment);
+  await commands.run(cli, ["mcp", "add", "--agent", "amp"], environment);
   const settings = JSON.parse(
     await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
   );
   const registration = settings?.["amp.mcpServers"]?.rea;
   if (!Array.isArray(registration?.args))
-    throw new Error("Incur mcp add did not write the native Amp registration");
+    throw new Error("Native mcp add did not write the native Amp registration");
   const command = [registration.command, ...registration.args];
   if (!(await isDirectRegistration(command, cli)))
     throw new Error(
-      "Incur mcp add did not register the selected absolute runtime and REA script",
+      "Native mcp add did not register the selected absolute runtime and REA script",
     );
   // REA owns native registration; no package runner may flatten the argv or
   // install a third-party registration helper as a side effect.
   if (await pathExists(npxLog))
     throw new Error("Native mcp add unexpectedly invoked npx");
-  await commands.run(cli, ["mcp", "add"], environment);
+  await commands.run(cli, ["mcp", "add", "--agent", "amp"], environment);
   deepStrictEqual(
     JSON.parse(
       await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
