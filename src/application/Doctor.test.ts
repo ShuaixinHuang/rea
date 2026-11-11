@@ -166,18 +166,36 @@ describe("doctor Hopper startup timeout", () => {
   });
 });
 
-describe("doctor native analysis configuration", () => {
+describe("doctor runtime analysis seed admission", () => {
   it.each([
-    ["REA_ANALYSIS_PROVIDER", "Hopper"],
     ["REA_REGEX_MATCHING_DEADLINE_MS", "0"],
     ["REA_BRIDGE_MAX_REQUEST_BYTES", "7463"],
     ["REA_CAPTURE_DECODER_OLD_GENERATION_MIB", "7"],
     ["REA_REGEX_WORKER_HEAP_REQUEST_MIB", "6"],
+    ["REA_GHIDRA_STARTUP_TIMEOUT_MS", "abc"],
+  ] as const)(
+    "defers %s admission until an analysis operation",
+    async (setting, value) => {
+      const result = await runDoctor(
+        undefined,
+        configurationHost({ [setting]: value }),
+        { providers: ["hopper"] },
+      );
+      expect(result.healthy).toBe(true);
+      expect(result.checks.map(({ name }) => name)).not.toContain(
+        `runtime-configuration:${setting}`,
+      );
+    },
+  );
+});
+
+describe("doctor native analysis configuration", () => {
+  it.each([
+    ["REA_ANALYSIS_PROVIDER", "Hopper"],
     ["REA_MCP_INITIALIZE_BUDGET_MS", "0"],
     ["REA_MCP_TOOLS_LIST_BUDGET_MS", "0"],
     ["REA_MCP_FIRST_CATALOG_BUDGET_MS", "0"],
     ["REA_MCP_DOCTOR_DEADLINE_MS", "0"],
-    ["REA_GHIDRA_STARTUP_TIMEOUT_MS", "abc"],
     ["REA_SWIFTC_COMPILE_TIMEOUT_MS", "0"],
     ["REA_LOG_LEVEL", "verbose"],
     ["REA_GHIDRA_COMPILER_SPEC_ID", "gcc"],
@@ -209,7 +227,7 @@ describe("doctor native analysis configuration", () => {
   );
 
   it.each([
-    ["REA_GHIDRA_STARTUP_TIMEOUT_MS", "abc"],
+    ["REA_MCP_INITIALIZE_BUDGET_MS", "0"],
     ["HOPPER_LOADER_ARGS_JSON", "{"],
     ["REA_GHIDRA_COMPILER_SPEC_ID", "gcc"],
     ["CALLER_SETTING", "private\0value"],
@@ -290,21 +308,21 @@ describe("doctor native analysis configuration", () => {
     ).toBe(false);
   });
 
-  it("keeps an invalid native setting informational when nothing starts MCP", async () => {
+  it("keeps an invalid MCP startup setting informational when nothing starts MCP", async () => {
     const result = await runDoctor(
       undefined,
-      configurationHost({ REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc" }),
+      configurationHost({ REA_MCP_INITIALIZE_BUDGET_MS: "abc" }),
       { providers: [] },
     );
 
     expect(result.healthy).toBe(true);
     expect(result.environment_healthy).toBe(false);
     expect(result.scope_checks.map(({ name }) => name)).not.toContain(
-      "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+      "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
     );
     expect(result.informational_checks).toContainEqual(
       expect.objectContaining({
-        name: "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+        name: "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
         ok: false,
       }),
     );
@@ -347,7 +365,7 @@ describe("doctor MCP startup readiness", () => {
       undefined,
       selectedHost({
         REA_LOG_LEVEL: "verbose",
-        REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc",
+        REA_MCP_INITIALIZE_BUDGET_MS: "abc",
       }),
       { clients: ["codex"] },
     );
@@ -361,7 +379,7 @@ describe("doctor MCP startup readiness", () => {
     );
     expect(client.scope_checks).toContainEqual(
       expect.objectContaining({
-        name: "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+        name: "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
         ok: false,
       }),
     );
@@ -373,7 +391,7 @@ describe("doctor MCP startup readiness", () => {
       undefined,
       selectedHost({
         REA_LOG_LEVEL: "verbose",
-        REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc",
+        REA_MCP_INITIALIZE_BUDGET_MS: "abc",
       }),
       { skill: true },
     );
@@ -385,24 +403,24 @@ describe("doctor MCP startup readiness", () => {
       }),
     );
     expect(skill.scope_checks.map(({ name }) => name)).not.toContain(
-      "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+      "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
     );
   });
 
   it("requires every MCP startup failure for an aligned client", async () => {
-    const ghidraTimeout = await runDoctor(
+    const startupBudget = await runDoctor(
       undefined,
-      selectedHost({ REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc" }),
+      selectedHost({ REA_MCP_INITIALIZE_BUDGET_MS: "abc" }),
       { clients: ["codex"] },
     );
-    expect(ghidraTimeout.healthy).toBe(false);
-    expect(ghidraTimeout.scope_checks).toContainEqual(
+    expect(startupBudget.healthy).toBe(false);
+    expect(startupBudget.scope_checks).toContainEqual(
       expect.objectContaining({
-        name: "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+        name: "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
         ok: false,
       }),
     );
-    expect(ghidraTimeout.scope_checks).toContainEqual(
+    expect(startupBudget.scope_checks).toContainEqual(
       expect.objectContaining({ name: "registration:codex", ok: true }),
     );
 
@@ -431,13 +449,13 @@ describe("doctor MCP startup readiness", () => {
 
     const skill = await runDoctor(
       undefined,
-      selectedHost({ REA_GHIDRA_STARTUP_TIMEOUT_MS: "abc" }),
+      selectedHost({ REA_MCP_INITIALIZE_BUDGET_MS: "abc" }),
       { skill: true },
     );
     expect(skill.healthy).toBe(true);
     expect(skill.informational_checks).toContainEqual(
       expect.objectContaining({
-        name: "runtime-configuration:REA_GHIDRA_STARTUP_TIMEOUT_MS",
+        name: "runtime-configuration:REA_MCP_INITIALIZE_BUDGET_MS",
         ok: false,
       }),
     );

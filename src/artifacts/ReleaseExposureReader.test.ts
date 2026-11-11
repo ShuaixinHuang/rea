@@ -4791,9 +4791,13 @@ describe("ReleaseExposureReader packaged map identity", () => {
   );
 });
 
-it.for(["a.js", "z.js"])(
-  "keeps a distinct normalized linker-map occurrence when %s declares the other",
-  async (script, context) => {
+it.for(
+  ["a.js", "z.js"].flatMap((script) =>
+    [1, 2].map((declarations) => ({ script, declarations })),
+  ),
+)(
+  "keeps a distinct normalized linker-map occurrence for $declarations declarations in $script",
+  async ({ script, declarations }, context) => {
     const root = await createTestTempDirectory("rea-map-identities-");
     const first = "café.map";
     const second = "cafe\u0301.map";
@@ -4803,7 +4807,10 @@ it.for(["a.js", "z.js"])(
       context.skip();
       return;
     }
-    await writeFile(join(root, script), `//# sourceMappingURL=${first}\n`);
+    await writeFile(
+      join(root, script),
+      `//# sourceMappingURL=${first}\n`.repeat(declarations),
+    );
     const scanned = await inspect(root);
     expect(scanned.debug_companions.paths).toEqual([join(root, second)]);
   },

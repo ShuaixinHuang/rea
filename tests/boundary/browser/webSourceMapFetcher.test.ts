@@ -1040,7 +1040,7 @@ describe("source-map response encoding", () => {
 });
 
 describe("source-map operation deadline observations", () => {
-  it("keeps completed maps when a later request times out", async () => {
+  it("keeps completed maps when a later fetch settles its deadline abort", async () => {
     let calls = 0;
     const requests = [
       request,
@@ -1048,20 +1048,72 @@ describe("source-map operation deadline observations", () => {
     ];
     const result = await fetchWebSourceMapsOk(requests, input(), undefined, {
       timeoutMs: 100,
-      fetch: () => {
+      fetch: (_url, init) => {
         calls += 1;
-        return calls === 1
-          ? Promise.resolve(validMapResponse())
-          : new Promise<Response>(() => undefined);
+        if (calls === 1) return Promise.resolve(validMapResponse());
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal == null)
+            throw new Error("Expected fetch cancellation signal");
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+          if (signal.aborted) reject(signal.reason);
+        });
       },
     });
-
     expect(result.status).toBe("partial");
     expect(result.items.map(({ status }) => status)).toEqual([
       "included",
       "fetch_failed",
     ]);
     expect(result.items[0]?.original_sources).toHaveLength(1);
+  });
+
+  it("retains completed maps and ownership until an uncooperative timed-out fetch settles", async () => {
+    let finish: ((response: Response) => void) | undefined;
+    const late = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    let calls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = new Response(body);
+    try {
+      const result = await fetchWebSourceMaps(
+        [request, { ...request, scriptKey: `scr_${"2".repeat(64)}` }],
+        input(),
+        undefined,
+        {
+          timeoutMs: 100,
+          fetch: () =>
+            ++calls === 1 ? Promise.resolve(validMapResponse()) : late,
+        },
+      );
+      if (result.ok) throw new Error("Expected retained fetch ownership");
+      expect(result.error.cleanupIncomplete).toBe(true);
+      expect(result.error.partialObservation).toMatchObject({
+        kind: "web-source-map-fetch",
+        source_maps: {
+          requested: 2,
+          processed: 1,
+          items: [{ status: "included" }],
+        },
+      });
+      finish?.(response);
+      await expect.poll(() => cancelled).toBe(true);
+      await expect.poll(() => result.error.cleanupIncomplete).toBe(false);
+      expect(result.error.partialObservation).toMatchObject({
+        source_maps: { processed: 1 },
+      });
+    } finally {
+      finish?.(response);
+      await late;
+    }
   });
 });
 

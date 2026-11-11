@@ -911,7 +911,7 @@ for (const invalidSetting of [
   { setting: "REA_JEB_MCP_TIMEOUT_MS", value: "1.5" },
 ] as const)
   cliTest(
-    `setup rejects malformed selected ${invalidSetting.setting} before writing`,
+    `setup admits runtime-recoverable seeds and rejects startup-only ${invalidSetting.setting}`,
     async ({ cli }) => {
       const home = await createTestTempDirectory(
         "rea-invalid-selected-registration-env-",
@@ -939,6 +939,19 @@ for (const invalidSetting of [
         cwd: home,
         environment,
       });
+      if (invalidSetting.setting !== "REA_MCP_INPUT_SCHEMA_PROFILE") {
+        expect(result.exitCode, result.stdout + result.stderr).toBe(0);
+        expect(result.json).toMatchObject({ status: "ready" });
+        expect(JSON.parse(await readFile(config, "utf8"))).toMatchObject({
+          mcpServers: {
+            rea: { env: { [invalidSetting.setting]: invalidSetting.value } },
+          },
+        });
+        await expect(access(`${config}.rea.backup`)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        return;
+      }
       expect(result.exitCode).toBe(1);
       expect(result.json).toMatchObject({
         status: "needs_human",

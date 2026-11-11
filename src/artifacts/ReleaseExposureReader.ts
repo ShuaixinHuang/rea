@@ -2058,11 +2058,11 @@ const noteLocalMapReference = (
  */
 const noteMapTarget = (state: ScanState, location: string): void => {
   const target = memberLocationKey(state, location);
-  // A map read before its declaration may have settled as a linker map.
-  state.skippedMaps += retractLinkerMapGuesses(state, location);
   const spellings = state.mapTargets.get(target);
   const spelling = anchoredLocation(state, location);
   if (spellings?.has(spelling)) return;
+  // A map read before its declaration may have settled as a linker map.
+  state.skippedMaps += retractLinkerMapGuesses(state, location);
   state.mapTargetBytes += Buffer.byteLength(spelling);
   if (state.mapTargetBytes > MAX_RELEASE_EXPOSURE_MAP_TARGET_BYTES) {
     state.skippedMaps += 1;
@@ -2116,6 +2116,7 @@ const retractLinkerMapGuesses = (
   if (guess !== undefined) {
     paths.delete(guess);
     if (paths.size === 0) state.linkerMapGuesses.delete(key);
+    state.claimedMapTargets.add(key);
     return 1;
   }
   // Without an exact source spelling, normalization cannot prove which

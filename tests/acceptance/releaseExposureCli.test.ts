@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "vitest";
 
@@ -121,4 +121,38 @@ cliTest(
     expect(report.summary.by_status.not_assessed).toBe(3);
   },
   60_000,
+);
+
+cliTest(
+  "retains the distinct linker-map source through normalized lookup in the public audit",
+  async ({ cli, skip }) => {
+    const root = await createTestTempDirectory("rea-release-map-identity-cli-");
+    const declared = "café.map";
+    const companion = "cafe\u0301.map";
+    await writeFile(join(root, declared), "linker map\n");
+    await writeFile(join(root, companion), "linker map\n");
+    if ((await readdir(root)).length !== 2) {
+      skip();
+      return;
+    }
+    await writeFile(
+      join(root, "z.js"),
+      `//# sourceMappingURL=${declared}\n`.repeat(2),
+    );
+    const result = await cli.run({
+      arguments: ["audit-release-exposure", root, "--json"],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const report = outputSchema.parse(result.json).normalized_result;
+    expect(
+      report.checks.find(({ id }) => id === "native.debug_companions"),
+    ).toMatchObject({
+      status: "exposed",
+      confidence: "inferred",
+      observation: {
+        counts: { companions: 1 },
+        samples: [join(root, companion)],
+      },
+    });
+  },
 );

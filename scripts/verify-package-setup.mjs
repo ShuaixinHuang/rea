@@ -12,7 +12,6 @@ import {
 import { dirname, isAbsolute, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 
-import { clientRegistrationCommandText } from "../dist/cli/clientRegistrationCommandText.js";
 import { TOOL_CONTRACTS } from "../dist/contracts/toolContracts.js";
 import { PRODUCT_IDENTITY } from "../dist/identity.js";
 import { pathExists } from "./lib/verify-package-core.mjs";
@@ -65,16 +64,19 @@ const verifyMcpAdd = async ({ commands, cli, environment, npxLog, home }) => {
     throw new Error(
       "Incur mcp add did not register the selected absolute runtime and REA script",
     );
-  // Amp consumes the same command through Incur's parser. Check the delegated
-  // helper receives that command as one argument, without flattening its argv.
-  deepStrictEqual(JSON.parse(await readFile(npxLog, "utf8")), [
-    "add-mcp",
-    clientRegistrationCommandText(command),
-    "--name",
-    "rea",
-    "-y",
-    "-g",
-  ]);
+  // REA owns native registration; no package runner may flatten the argv or
+  // install a third-party registration helper as a side effect.
+  if (await pathExists(npxLog))
+    throw new Error("Native mcp add unexpectedly invoked npx");
+  await commands.run(cli, ["mcp", "add"], environment);
+  deepStrictEqual(
+    JSON.parse(
+      await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
+    ),
+    settings,
+  );
+  if (await pathExists(npxLog))
+    throw new Error("Repeated native mcp add unexpectedly invoked npx");
 };
 
 const verifySetupPlan = async ({

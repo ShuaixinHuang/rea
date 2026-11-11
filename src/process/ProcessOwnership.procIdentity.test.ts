@@ -544,7 +544,9 @@ it("preserves cancellation before and after the signal-zero probe", async () => 
   const reason = new Error("cancelled");
   controller.abort(reason);
   filesystem.readFile.mockRejectedValueOnce(
-    Object.assign(new Error("aborted"), { name: "AbortError" }),
+    Object.assign(new Error("aborted", { cause: reason }), {
+      name: "AbortError",
+    }),
   );
   await expect(
     host.processIdentities?.([entry], controller.signal),
