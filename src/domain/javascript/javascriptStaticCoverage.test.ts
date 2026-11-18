@@ -50,11 +50,57 @@ it.each(["main.js", ".js", ".mjs", ".cjs", ".JS", ".MJS"])(
         },
       ]);
       expect(result.limitations).toContainEqual(
-        expect.stringContaining(
-          path.startsWith(".")
-            ? "loader invocation is unknown"
-            : "only if Node loads it as an ES module",
-        ),
+        expect.stringContaining("loader invocation is unknown"),
+      );
+    }
+  },
+);
+
+it.each([
+  ["child.cjs", "module"],
+  ["child.js", "commonjs"],
+  ["child.js", "unspecified"],
+  [".cjs", "commonjs"],
+  [".JS", "commonjs"],
+] as const)(
+  "retains conditional CommonJS imports and original origins for %s (%s)",
+  (path, packageType) => {
+    const source =
+      '\uFEFF#!/usr/bin/env node\r\nconst face="😀"; require("./dep.cjs");';
+    const application = parseJavaScriptSource(source, path, packageType);
+    expect(application).not.toBeNull();
+    const recovered = parseRecoveredJavaScript(
+      source,
+      path,
+      { plugins: parserPluginsForPath(path) },
+      packageType,
+    ).file;
+    for (const file of [application!, recovered]) {
+      expect(file.errors).toEqual([]);
+      expect(javaScriptRuntimeContext(file.program)).toBe("unknown");
+      expect(javaScriptProgramStrictness(file.program)).toBe("unknown");
+      const result = analyzeParsedJavaScriptStaticSource(source, file);
+      expect(result.parse_status).toBe("partial");
+      expect(result.analysis_coverage.syntax).toEqual({
+        status: "complete",
+        error_count: 0,
+      });
+      expect(result.analysis_coverage.semantics.uncertainty).toContain(
+        "conditional-loader",
+      );
+      expect(result.references).toContainEqual(
+        expect.objectContaining({
+          kind: "require",
+          specifier: "./dep.cjs",
+          loader_authority: "candidate",
+          location: {
+            start: { line: 2, column: 17 },
+            end: { line: 2, column: 37 },
+          },
+        }),
+      );
+      expect(result.limitations).toContainEqual(
+        expect.stringContaining("loader invocation is unknown"),
       );
     }
   },

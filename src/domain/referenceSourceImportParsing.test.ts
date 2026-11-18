@@ -61,8 +61,8 @@ it("keeps declaration-level imports when the member-mutation phase is refused", 
 it.each([
   ["main.mjs", "commonjs", true],
   ["main.js", "module", true],
-  ["main.cjs", "module", false],
-  ["main.js", "commonjs", false],
+  ["main.cjs", "module", true],
+  ["main.js", "commonjs", true],
   ["main.mts", "commonjs", true],
   ["main.cts", "module", true],
   ["main.ts", "commonjs", true],
@@ -72,15 +72,15 @@ it.each([
   [".js", "module", true],
   [".mjs", "module", true],
   [".mjs", "commonjs", false],
-  [".js", "commonjs", false],
+  [".js", "commonjs", true],
   [".cjs", "module", true],
   [".CJS", "module", true],
   [".JS", "module", true],
   [".MJS", "module", true],
-  [".cjs", "commonjs", false],
+  [".cjs", "commonjs", true],
 ] as const)(
-  "retains the loader's BOM/hashbang semantics for %s (%s)",
-  (path, packageType, valid) => {
+  "retains BOM/hashbang grammar and loader uncertainty for %s (%s)",
+  (path, packageType, syntaxComplete) => {
     const esm =
       path.endsWith(".mjs") ||
       path.endsWith(".mts") ||
@@ -96,17 +96,24 @@ it.each([
       path.endsWith("js") ? "JavaScript" : "TypeScript",
       packageType,
     );
-    if (valid) {
+    if (syntaxComplete) {
       expect(parsed.parse_failures).toEqual([]);
       expect(parsed.relationships).toMatchObject([
         {
           to: esm ? "./dep.mjs" : "./dep.cjs",
-          parse_state: path.startsWith(".") ? "partial" : "parsed",
+          parse_state:
+            path.startsWith(".") ||
+            path === "main.cjs" ||
+            (path === "main.js" && packageType === "commonjs")
+              ? "partial"
+              : "parsed",
         },
       ]);
     } else {
       expect(parsed.parse_failures).toHaveLength(1);
-      expect(parsed.relationships).toEqual([]);
+      expect(parsed.relationships).toMatchObject([
+        { parse_state: "partial", to: "./dep.mjs" },
+      ]);
     }
   },
 );

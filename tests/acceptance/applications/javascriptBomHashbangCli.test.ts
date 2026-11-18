@@ -50,10 +50,13 @@ const fixture = async () => {
       '\uFEFF#!/usr/bin/env node\nconst face: string="😀"; import {marker} from "./dep.mjs"; console.log(JSON.stringify({marker}));',
     "typed.cts":
       '\uFEFF#!/usr/bin/env node\nconst face: string="😀"; const {marker}=require("./dep.cjs"); console.log(JSON.stringify({marker}));',
-    "rejected.cjs":
-      '\uFEFF#!/usr/bin/env node\nconst {marker}=require("./dep.cjs"); console.log(JSON.stringify({marker}));',
-    "rejected.js":
-      '\uFEFF#!/usr/bin/env node\nconst {marker}=require("./dep.cjs"); console.log(JSON.stringify({marker}));',
+    "imported.cjs":
+      '\uFEFF#!/usr/bin/env node\r\nconst face="😀"; if (false) return; const {marker}=require("./dep.cjs"); module.exports={marker};',
+    "imported.js":
+      '\uFEFF#!/usr/bin/env node\r\nconst face="😀"; if (false) return; const {marker}=require("./dep.cjs"); module.exports={marker};',
+    "invoke-cjs.mjs":
+      'import cjs from "./imported.cjs"; import js from "./imported.js"; console.log(JSON.stringify([cjs.marker, js.marker]));',
+    "malformed.cjs": "\uFEFF#!/usr/bin/env node\nconst value = ;",
     "plain.cjs":
       '#!/usr/bin/env node\nconst {marker}=require("./dep.cjs"); console.log(JSON.stringify({marker}));',
     "dep.mjs": "export const marker=42;",
@@ -84,11 +87,12 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       "plain.cjs",
     ])
       expect(await runNodeJsonControl(root, path)).toEqual({ marker: 42 });
-    for (const path of ["rejected.cjs", "rejected.js"])
+    for (const path of ["imported.cjs", "imported.js"])
       await expect(runNodeJsonControl(root, path)).rejects.toMatchObject({
         code: 1,
         stderr: expect.stringContaining("SyntaxError"),
       });
+    expect(await runNodeJsonControl(root, "invoke-cjs.mjs")).toEqual([42, 42]);
     expect(await runNodeJsonControl(root, "esm/invoke.mjs")).toEqual(
       importedDotfiles.map(() => 42),
     );
@@ -103,7 +107,7 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       cli,
       root,
     );
-    expect(statistics.parse_failures).toBe(2);
+    expect(statistics.parse_failures).toBe(1);
     for (const [path, kind, target] of [
       ["module.mjs", "static-import", "dep.mjs"],
       ["esm/main.js", "static-import", "dep.mjs"],
@@ -113,6 +117,8 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       ["typed.mts", "static-import", "dep.mjs"],
       ["typed.cts", "require", "dep.cjs"],
       ["plain.cjs", "require", "dep.cjs"],
+      ["imported.cjs", "require", "dep.cjs"],
+      ["imported.js", "require", "dep.cjs"],
       ...importedDotfiles.map(
         ({ path }) => [path, "static-import", "dep.mjs"] as const,
       ),
@@ -131,7 +137,12 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       );
       expect(edges).toHaveLength(1);
       expect(edges[0]).toMatchObject({
-        properties: { resolved_path: target },
+        properties: {
+          resolved_path: path.startsWith("imported.") ? null : target,
+          ...(path.startsWith("imported.")
+            ? { loader_authority: "candidate" }
+            : {}),
+        },
         evidence: {
           artifact: {
             available: true,
@@ -170,22 +181,35 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
         ]),
       },
     });
-    expect(
-      graph.edges.filter(
-        ({ relation, evidence }) =>
-          relation === "imports" &&
-          evidence.location.available &&
-          evidence.location.value.kind === "source-range" &&
-          ["rejected.cjs", "rejected.js"].includes(
-            evidence.location.value.source,
-          ),
-      ),
-    ).toEqual([]);
+    for (const path of ["imported.cjs", "imported.js"]) {
+      const observation = graph.nodes
+        .flatMap(({ observations }) => observations)
+        .find(
+          ({ properties }) =>
+            properties.path === path && properties.text_status !== undefined,
+        );
+      expect(observation).toMatchObject({
+        properties: {
+          parse_status: "partial",
+          analysis_coverage: {
+            syntax: { status: "complete", error_count: 0 },
+            semantics: {
+              uncertainty: expect.arrayContaining(["conditional-loader"]),
+            },
+          },
+        },
+        evidence: {
+          limitations: expect.arrayContaining([
+            expect.stringContaining("loader invocation is unknown"),
+          ]),
+        },
+      });
+    }
   },
 );
 
 cliTest.runIf(process.platform !== "win32")(
-  "reference import retains module imports and rejects CommonJS BOM/hashbangs",
+  "reference import retains conditional CommonJS imports and module imports",
   async ({ cli }) => {
     const { root, files } = await fixture();
     const output = await cli.run({
@@ -212,15 +236,11 @@ cliTest.runIf(process.platform !== "win32")(
       }),
     );
     expect(partial.limitations).toContainEqual(
-      expect.stringContaining("only if Node loads it as an ES module"),
+      expect.stringContaining("loader invocation is unknown"),
     );
     expect(output.exitCode, output.stderr).toBe(0);
     const graph = historicalSourceGraphSchema.parse(output.json);
-    expect(
-      graph.parse_failures
-        .map(({ path }) => path)
-        .sort((a, b) => a.localeCompare(b)),
-    ).toEqual(["rejected.cjs", "rejected.js"]);
+    expect(graph.parse_failures).toMatchObject([{ path: "malformed.cjs" }]);
     for (const [path, parseState] of [
       ["module.mjs", "parsed"],
       ["esm/main.js", "parsed"],
@@ -254,11 +274,26 @@ cliTest.runIf(process.platform !== "win32")(
         parse_state: "parsed",
       }),
     );
-    expect(
-      graph.relationships.filter(({ from_path }) =>
-        from_path.startsWith("rejected."),
-      ),
-    ).toEqual([]);
+    for (const path of ["imported.cjs", "imported.js"]) {
+      expect(graph.entries).toContainEqual(
+        expect.objectContaining({
+          path,
+          sha256: createHash("sha256").update(files[path]!).digest("hex"),
+        }),
+      );
+      expect(graph.relationships).toContainEqual(
+        expect.objectContaining({
+          from_path: path,
+          to: "./dep.cjs",
+          kind: "requires",
+          parse_state: "partial",
+          resolution: "unknown",
+        }),
+      );
+      expect(graph.limitations).toContainEqual(
+        expect.stringContaining(`Source in ${path}`),
+      );
+    }
   },
 );
 
@@ -329,7 +364,7 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
           properties.path === "main.js" && properties.text_status !== undefined,
       );
     expect(sourceObservation?.evidence.limitations).toContainEqual(
-      expect.stringContaining("only if Node loads it as an ES module"),
+      expect.stringContaining("loader invocation is unknown"),
     );
   },
 );

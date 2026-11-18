@@ -122,46 +122,50 @@ const parseWithRuntimeContext = (
   const filenameMode = explicitJavaScriptLoaderMode(sourcePath);
   const packageContext = packageContextForPath(sourcePath, observedPackageType);
   const suffixOnlySource = isSuffixOnlySourcePath(sourcePath);
-  const ambiguousHashbangPath =
-    posix.extname(sourcePath ?? "") === ".js" || suffixOnlySource;
-  // Dotfile entrypoints have no extname. Their package can explain signature
-  // preprocessing, but must not grant wrapper/module authority to ordinary data.
-  const signaturePackageContext = ambiguousHashbangPath
+  // Inventory paths establish grammar, not how a loader preprocesses bytes.
+  // ESM import can preprocess even a CommonJS source differently from direct
+  // entry or require(). Recover that source conditionally at this one boundary.
+  const signaturePackageContext = suffixOnlySource
     ? observedPackageType
     : packageContext;
-  // ESM and TypeScript file loading remove the UTF-8 signature before a
-  // hashbang; JavaScript CommonJS loading does not. Preserve original indexes
-  // through Babel's origin options rather than repairing downstream ranges.
   const compilerSource = /\.(?:jsx|ts|tsx|mts|cts)$/iu.test(sourcePath ?? "");
-  const conditionalModule =
-    source.startsWith("\uFEFF#!") &&
-    ambiguousHashbangPath &&
-    (signaturePackageContext === undefined ||
-      signaturePackageContext === "unknown" ||
-      (suffixOnlySource && signaturePackageContext === "module"));
-  const loaderCondition = conditionalModule
-    ? suffixOnlySource
-      ? `Source in ${sourcePath ?? "<unknown>"} is recovered under an ES module interpretation. Its loader invocation is unknown; direct entrypoint and module import can differ.`
-      : `Source in ${sourcePath ?? "<unknown>"} is parseable only if Node loads it as an ES module. Its package loader mode is unknown.`
-    : undefined;
   const hashbangSignature =
     source.startsWith("\uFEFF#!") &&
-    (compilerSource ||
-      conditionalModule ||
-      filenameMode === "module" ||
-      (filenameMode === undefined && signaturePackageContext === "module"));
+    sourcePath !== undefined &&
+    isJavaScriptSourcePath(sourcePath);
+  const conditionalLoader =
+    hashbangSignature &&
+    (suffixOnlySource ||
+      (!compilerSource &&
+        filenameMode !== "module" &&
+        !(filenameMode === undefined && signaturePackageContext === "module")));
+  const loaderCondition = conditionalLoader
+    ? `Source in ${sourcePath ?? "<unknown>"} is recovered after removing its initial BOM before the hashbang. Its loader invocation is unknown; direct entrypoint, require(), and module import can differ.`
+    : undefined;
+  const normalizedOptions = { ...options };
+  if (
+    conditionalLoader &&
+    (filenameMode === "commonjs" || signaturePackageContext === "commonjs")
+  ) {
+    normalizedOptions.sourceType = "commonjs";
+  }
+  if (normalizedOptions.sourceType === "commonjs") {
+    // Babel owns wrapper grammar; explicit outside-function overrides conflict.
+    delete normalizedOptions.allowAwaitOutsideFunction;
+    delete normalizedOptions.allowReturnOutsideFunction;
+    delete normalizedOptions.allowNewTargetOutsideFunction;
+  }
   const file = parse(
     hashbangSignature ? source.slice(1) : source,
     hashbangSignature
       ? {
-          ...options,
-          ...(conditionalModule ? { sourceType: "module" as const } : {}),
+          ...normalizedOptions,
           startIndex: (options.startIndex ?? 0) + 1,
           startColumn: (options.startColumn ?? 0) + 1,
         }
-      : options,
+      : normalizedOptions,
   );
-  const runtime = conditionalModule
+  const runtime = conditionalLoader
     ? "unknown"
     : filenameMode === "commonjs"
       ? sourcePath?.toLowerCase().endsWith(".d.cts")
@@ -283,20 +287,12 @@ export const parseRecoveredJavaScript = (
           ? "commonjs"
           : "unambiguous";
   if (sourceType !== "unambiguous") {
-    const normalizedOptions = { ...options };
-    if (sourceType === "commonjs") {
-      // Babel owns these wrapper semantics in CommonJS mode and rejects
-      // explicit script overrides, including the reference-import options.
-      delete normalizedOptions.allowAwaitOutsideFunction;
-      delete normalizedOptions.allowReturnOutsideFunction;
-      delete normalizedOptions.allowNewTargetOutsideFunction;
-    }
     return {
       file: parseWithRuntimeContext(
         source,
         sourcePath,
         {
-          ...normalizedOptions,
+          ...options,
           sourceType,
           errorRecovery: true,
         },

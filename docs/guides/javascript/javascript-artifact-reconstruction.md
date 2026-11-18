@@ -228,8 +228,8 @@ observation. `syntax` distinguishes complete parsing, recovered syntax errors,
 failed parsing and unexamined source. `semantics` records the number of observed
 unknown findings and typed uncertainty, including returned-reference widening
 and unavailable type-only compiler options. `conditional-loader` records a
-BOM/hashbang source recovered under an ES module interpretation when its package
-mode or loader invocation is unknown; its overall `parse_status` stays partial without inventing a
+BOM/hashbang source recovered when its loader invocation is unknown; its overall
+`parse_status` stays partial without inventing a
 syntax error. `examination` reports static semantic
 resource limits and Electron wrapper expansion limits independently. A completed
 pass does not establish complete runtime semantics. Route examination and result
@@ -359,14 +359,16 @@ code unit, matching the original bytes identified by the artifact digest.
 A BOM before a hashbang is accepted for TypeScript and JSX compiler inputs,
 explicit ES modules, and JavaScript in an observed module package.
 For this prefix, suffix-only source names, including `.cjs` and case variants such as `.MJS`,
-retain a conditional ES module interpretation: direct entrypoint and module
-import can select different loaders even in an observed module package.
+retain a conditional interpretation: direct entrypoint and module import can
+preprocess differently even in an observed module package.
 Missing package context likewise retains a conditional interpretation for
 ambiguous JavaScript through application analysis and reference import;
-neither recovery proves runtime module mode.
+neither recovery proves runtime mode. CommonJS sources can also load through
+ESM import despite rejecting the same prefix as direct entrypoints or through
+`require()`. Known CommonJS sources retain their grammar with conditional loader
+authority; an inventory does not prove which invocation occurred.
 Source indexes and later-line columns still refer to the original text.
-Proven CommonJS loading with that prefix remains unparseable, as it is in Node;
-a plain hashbang stays valid.
+A plain hashbang stays valid; unrelated malformed syntax remains a parse failure.
 
 Plain `.ts` artifact sources use TypeScript syntax without JSX, including
 angle-bracket type assertions. `.tsx` and `.jsx` retain JSX parsing.
