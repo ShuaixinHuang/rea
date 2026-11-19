@@ -808,7 +808,8 @@ const rejectsSocketLiteralArguments = (
           resolved.value > 65535
         );
       if (t.isStringLiteral(resolved)) return resolved.value.length === 0;
-      if (t.isNullLiteral(resolved) || t.isBooleanLiteral(resolved)) return true;
+      if (t.isNullLiteral(resolved) || t.isBooleanLiteral(resolved))
+        return true;
     }
     return false;
   }
