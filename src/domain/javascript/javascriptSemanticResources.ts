@@ -779,24 +779,8 @@ const rejectsSocketLiteralArguments = (
   ) {
     const effective = socketOptionReader(node, specifier, context.state);
     if (effective !== undefined) {
-      const path = effective("path");
-      if (path === "unknown") return false;
-      if (
-        path !== undefined &&
-        isNullishPlaceholder(path, context.state) === false &&
-        staticJavaScriptTruthiness(path) !== false
-      )
+      if (socketHasPossibleIpcOption(effective, node, specifier, context.state))
         return false;
-      if (specifier === "tls") {
-        const socket = effective("socket");
-        if (socket === "unknown") return false;
-        if (
-          socket !== undefined &&
-          isNullishPlaceholder(socket, context.state) === false &&
-          staticJavaScriptTruthiness(socket) !== false
-        )
-          return false;
-      }
       const effectivePort = effective("port");
       if (effectivePort === "unknown" || effectivePort === undefined)
         return false;
@@ -1159,13 +1143,12 @@ const rejectsSecureProtocolLiteral = (
  * from a patched `Object.prototype`. Anything not statically known keeps the
  * acquisition.
  */
-const rejectsSocketHostMember = (
+const socketHasPossibleIpcOption = (
+  effective: NonNullable<ReturnType<typeof socketOptionReader>>,
   node: t.CallExpression | t.OptionalCallExpression,
   specifier: string,
   state: JavaScriptSemanticAnalysisState,
 ): boolean => {
-  const effective = socketOptionReader(node, specifier, state);
-  if (effective === undefined) return false;
   const falsy = (value: t.Node) =>
     isNullishPlaceholder(value, state) ||
     staticJavaScriptTruthiness(value) === false;
@@ -1175,9 +1158,21 @@ const rejectsSocketHostMember = (
   for (const member of specifier === "tls" ? ["path", "socket"] : ["path"]) {
     const value = effective(member);
     if (value === "unknown" || (value !== undefined && !falsy(value)))
-      return false;
-    if (value === undefined && inheritable) return false;
+      return true;
+    if (value === undefined && inheritable) return true;
   }
+  return false;
+};
+
+const rejectsSocketHostMember = (
+  node: t.CallExpression | t.OptionalCallExpression,
+  specifier: string,
+  state: JavaScriptSemanticAnalysisState,
+): boolean => {
+  const effective = socketOptionReader(node, specifier, state);
+  if (effective === undefined) return false;
+  if (socketHasPossibleIpcOption(effective, node, specifier, state))
+    return false;
   const host = effective("host");
   if (host === undefined || host === "unknown") return false;
   // Every statically truthy shape other than a string literal is a non-string.

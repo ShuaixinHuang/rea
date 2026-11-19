@@ -53,15 +53,20 @@ it.each([
   ["a zero port", `net.connect(0)`, "connect"],
   ["a low port", `net.connect(80)`, "connect"],
   ["the highest port", `net.connect(65535)`, "connect"],
+  [
+    "an inherited IPC path with an invalid port",
+    `Object.prototype.path = "/tmp/x.sock"; net.connect({ port: 65536 })`,
+    "connect",
+  ],
   ["a Unix socket path", `net.connect("/tmp/x.sock")`, "connect"],
   [
     "a Unix socket path in options",
-    `net.connect({ path: "/tmp/x.sock", port: -1 })`,
+    `net.connect({ path: "/tmp/x.sock", port: 65536 })`,
     "connect",
   ],
   [
     "a Unix socket path in later TLS options",
-    `tls.connect({ port: -1 }, { path: "/tmp/x.sock" })`,
+    `tls.connect({ port: 65536 }, { path: "/tmp/x.sock" })`,
     "connect",
   ],
   ["an options object", `net.connect({ port: 80 })`, "connect"],
