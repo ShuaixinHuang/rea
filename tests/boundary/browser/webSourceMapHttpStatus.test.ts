@@ -7,6 +7,103 @@ import { fetchWebSourceMaps } from "../../../src/browser/WebSourceMapFetcher.js"
 import { fetchWebSourceMapsOk } from "../../fixtures/fetchWebSourceMapsOk.js";
 import { analyzeWebBundleInputSchema } from "../../../src/domain/webBundleAnalysis.js";
 
+const input = analyzeWebBundleInputSchema.parse({
+  cdp_endpoint: "http://127.0.0.1:9222",
+  allowed_origins: ["https://app.example.test"],
+  target_id: "page-1",
+  fetch_source_maps: true,
+});
+const request = {
+  scriptKey: `scr_${"1".repeat(64)}`,
+  declaredUrl: "https://app.example.test/app.js.map",
+  fetchUrl: "https://app.example.test/app.js.map",
+};
+
+it("does not promote an HTTP byte range to a complete source map", async () => {
+  const leaf = (source: string) => ({
+    version: 3,
+    sources: [source],
+    sourcesContent: [`export const value = ${JSON.stringify(source)};`],
+    names: [],
+    mappings: "AAAA",
+  });
+  const first = leaf("first.js");
+  const secondMap = leaf("second.js");
+  const second = JSON.stringify(secondMap);
+  const complete = JSON.stringify({
+    version: 3,
+    sections: [
+      { offset: { line: 0, column: 0 }, map: first },
+      { offset: { line: 10, column: 0 }, map: secondMap },
+    ],
+  });
+  const start = Buffer.byteLength(complete.slice(0, complete.indexOf(second)));
+  let partial = false;
+  const server = createServer((_request, response) => {
+    response.writeHead(partial ? 206 : 200, {
+      "content-type": "application/json",
+      ...(partial
+        ? {
+            "content-range": `bytes ${String(start)}-${String(start + Buffer.byteLength(second) - 1)}/${String(Buffer.byteLength(complete))}`,
+          }
+        : {}),
+    });
+    response.end(partial ? second : complete);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string")
+    throw new Error("Expected TCP address");
+  const url = `http://127.0.0.1:${String(address.port)}/app.js.map`;
+  const selected = [{ ...request, declaredUrl: url, fetchUrl: url }];
+  const options = { ...input, allowed_origins: [new URL(url).origin] };
+  try {
+    const control = await fetchWebSourceMapsOk(selected, options);
+    expect(control.status).toBe("included");
+    expect(
+      control.items[0]?.original_sources.map((source) => source.source),
+    ).toEqual([new URL("first.js", url).href, new URL("second.js", url).href]);
+    partial = true;
+    const result = await fetchWebSourceMapsOk(selected, options);
+    expect(result).toMatchObject({
+      status: "unavailable",
+      processed: 1,
+      items: [{ status: "fetch_failed", original_sources: [], mappings: [] }],
+    });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it("releases an unread partial-content response through the existing cleanup owner", async () => {
+  let cancellations = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(stream) {
+      stream.enqueue(
+        new TextEncoder().encode(
+          JSON.stringify({ version: 3, sources: [], names: [], mappings: "" }),
+        ),
+      );
+      stream.close();
+    },
+    async cancel() {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      cancellations += 1;
+    },
+  });
+  const result = await fetchWebSourceMapsOk(
+    [request],
+    { ...input, allowed_origins: [new URL(request.fetchUrl).origin] },
+    undefined,
+    { fetch: async () => new Response(body, { status: 206 }) },
+  );
+  expect(result.items[0]?.status).toBe("fetch_failed");
+  expect(cancellations).toBe(1);
+  expect(body.locked).toBe(false);
+});
+
 it("follows only redirect statuses and releases discarded HTTP response bodies", async () => {
   const redirects = [301, 302, 303, 307, 308];
   const otherStatuses = [300, 304, 305, 306, 400];

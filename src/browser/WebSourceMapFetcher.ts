@@ -636,19 +636,24 @@ const fetchOne = async (
       }
       throw cause;
     }
-    if (!response.ok) {
+    // A byte range can itself be a valid leaf of an indexed map. Parsing it
+    // would lose sibling sources and the leaf's generated-position offset.
+    const responseFailure = !response.ok
+      ? `Source-map server returned HTTP ${String(response.status)}.`
+      : response.status === 206
+        ? "Source-map server returned partial content (HTTP 206); a complete source-map representation is required."
+        : null;
+    if (responseFailure !== null) {
       await cancelUnreadResponse(
         response,
         fetchedUrl,
-        new Error(
-          `Source-map server returned HTTP ${String(response.status)}.`,
-        ),
+        new Error(responseFailure),
         signal,
       );
       return emptySourceMapItem(
         request,
         "fetch_failed",
-        `Source-map server returned HTTP ${String(response.status)}.`,
+        responseFailure,
         fetchedUrl,
       );
     }
