@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { expect, it } from "vitest";
 import {
   FFS2_FILE_SYSTEM_GUID,
+  FFS3_FILE_SYSTEM_GUID,
   formatGuidLittleEndian,
   guidEquals,
 } from "./UefiGuid.js";
@@ -59,4 +60,9 @@ it("compares GUIDs case-insensitively without accepting mixed values", () => {
   expect(
     guidEquals(FFS2_FILE_SYSTEM_GUID, "ee4e5898-3914-4259-9d6e-dc7bd79403cf"),
   ).toBe(false);
+});
+
+it("recognizes the PI FFS3 container GUID from raw little-endian bytes", () => {
+  const bytes = Buffer.from("7ac07354cb3dca4dbd6f1e9689e7349a", "hex");
+  expect(formatGuidLittleEndian(bytes, 0)).toBe(FFS3_FILE_SYSTEM_GUID);
 });
