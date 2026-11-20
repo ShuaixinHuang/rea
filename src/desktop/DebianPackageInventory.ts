@@ -302,6 +302,12 @@ export const debianPackage = async (
     ),
   );
   const parsed = status === undefined ? undefined : parseDpkgStatus(status);
+  if (parsed?.status === "config-files" || parsed?.status === "not-installed") {
+    limitations.push(
+      `dpkg reports ${name} as ${parsed.status}, so file ownership does not establish an installed application package.`,
+    );
+    return unknown;
+  }
   const policy = await queryUtf8Text(
     host.runQuery,
     "apt-cache",

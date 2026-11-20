@@ -351,6 +351,29 @@ const vendorFixture = async (options: FixtureOptions = {}) => {
 const sha256 = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
 
+it("does not treat a dpkg owner with only residual configuration as installed", async () => {
+  const { inspect, runQuery, queries } = await vendorFixture();
+  const result = await inspect(async (command, argv, options) =>
+    command === "dpkg-query" && argv[0] === "-W"
+      ? { stdout: "typora\t1.14.9-1\tarm64\tconfig-files\n", exitCode: 0 }
+      : runQuery(command, argv, options),
+  );
+  if (!result.ok) throw new Error(result.error.reason);
+  expect(result.value.inventory.package).toMatchObject({
+    kind: "unknown",
+    version: null,
+    architecture: null,
+    sources: [],
+  });
+  expect(result.value.limitations).toContain(
+    "dpkg reports typora:arm64 as config-files, so file ownership does not establish an installed application package.",
+  );
+  expect(
+    exportInstall(result.value.inventory.package, "typora", "arm64").ok,
+  ).toBe(false);
+  expect(queries).not.toContain("apt-cache");
+});
+
 const inspected = async (options: FixtureOptions = {}) => {
   const fixture = await vendorFixture(options);
   const result = await fixture.inspect();
