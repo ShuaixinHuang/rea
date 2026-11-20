@@ -50,13 +50,16 @@ export async function collectJobTimings({
   const endpoint = `repos/${identity.repository}/actions/runs/${identity.runId}/attempts/${identity.runAttempt}/jobs?per_page=100`;
   const { stdout } = await execFileAsync(
     "gh",
-    ["api", "--paginate", "--slurp", endpoint],
+    ["api", "--paginate", "--jq", ".", endpoint],
     { env, encoding: "utf8", maxBuffer: MAX_BUFFER, timeout: timeoutMs },
   );
   const rawPath = join(outputDirectory, "jobs.json");
   await mkdir(outputDirectory, { recursive: true });
-  await writeFile(rawPath, stdout, "utf8");
-  const pages = parsePages(stdout);
+  // The identity jq filter emits one compact JSON value per page, including
+  // with gh releases that predate --slurp. Keep the raw artifact's page array.
+  const raw = `[${stdout.trim().split(/\r?\n/u).join(",")}]`;
+  await writeFile(rawPath, raw, "utf8");
+  const pages = parsePages(raw);
   const jobs = pages.flatMap(({ jobs: pageJobs }, index) =>
     validateJobs(pageJobs, index),
   );
@@ -105,15 +108,15 @@ function parsePositiveInteger(value, name) {
   throw new Error(`${name} must be a positive safe integer`);
 }
 
-function parsePages(stdout) {
+function parsePages(raw) {
   let pages;
   try {
-    pages = JSON.parse(stdout);
+    pages = JSON.parse(raw);
   } catch (cause) {
     throw new Error("GitHub jobs API returned malformed JSON", { cause });
   }
   if (!Array.isArray(pages) || pages.length === 0)
-    throw new Error("GitHub jobs API slurp must contain a nonempty page array");
+    throw new Error("GitHub jobs API must return at least one page");
   for (const page of pages)
     if (
       typeof page !== "object" ||

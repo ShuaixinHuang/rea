@@ -144,7 +144,8 @@ it("merges paginated jobs, reports elapsed metrics, and preserves raw responses"
   expect(args).toEqual([
     "api",
     "--paginate",
-    "--slurp",
+    "--jq",
+    ".",
     "repos/example/rea/actions/runs/42/attempts/2/jobs?per_page=100",
   ]);
 });
@@ -351,11 +352,14 @@ async function createFixture(
   const raw = JSON.stringify(pages);
   const rawPath = join(directory, "gh-response.json");
   const args = join(directory, "gh-args.json");
-  await writeFile(rawPath, raw);
+  await writeFile(
+    rawPath,
+    pages.map((page) => JSON.stringify(page)).join("\n") + "\n",
+  );
   const fakeGh = join(fakeBin, "gh");
   await writeFile(
     fakeGh,
-    `#!/usr/bin/env node\nconst fs = require("node:fs");\nfs.writeFileSync(process.env.CI_GH_ARGS, JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write(fs.readFileSync(process.env.CI_GH_RESPONSE, "utf8"));\nprocess.exitCode = ${String(exitCode)};\n`,
+    `#!/usr/bin/env node\nconst fs = require("node:fs");\nfs.writeFileSync(process.env.CI_GH_ARGS, JSON.stringify(process.argv.slice(2)));\nif (process.argv.includes("--slurp")) { process.stderr.write("unknown flag: --slurp"); process.exit(1); }\nprocess.stdout.write(fs.readFileSync(process.env.CI_GH_RESPONSE, "utf8"));\nprocess.exitCode = ${String(exitCode)};\n`,
   );
   await chmod(fakeGh, 0o755);
   const outputDirectory = join(directory, ".cache", "ci-job-timings");

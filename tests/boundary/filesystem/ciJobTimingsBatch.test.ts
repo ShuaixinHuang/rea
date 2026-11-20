@@ -108,13 +108,15 @@ it("collects the latest attempt for recent completed CI and Release runs into a 
   expect(calls).toContainEqual([
     "api",
     "--paginate",
-    "--slurp",
+    "--jq",
+    ".",
     "repos/example/rea/actions/runs/42/attempts/3/jobs?per_page=100",
   ]);
   expect(calls).toContainEqual([
     "api",
     "--paginate",
-    "--slurp",
+    "--jq",
+    ".",
     "repos/example/rea/actions/runs/41/attempts/1/jobs?per_page=100",
   ]);
   const failedReport = JSON.parse(
@@ -255,6 +257,7 @@ fs.writeFileSync(process.env.CI_GH_CALLS, JSON.stringify(calls));
 const responses = JSON.parse(fs.readFileSync(process.env.CI_GH_RESPONSES, "utf8"));
 const response = responses[calls.length - 1];
 if (response && response.error) { process.stderr.write("fixture API error"); process.exitCode = 1; }
+else if (process.argv.includes("--jq") && Array.isArray(response)) process.stdout.write(response.map((page) => JSON.stringify(page)).join("\\n") + "\\n");
 else process.stdout.write(JSON.stringify(response));
 `,
   );
