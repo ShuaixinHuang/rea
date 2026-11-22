@@ -218,7 +218,7 @@ export const compatibleSlice = (
       );
       if (slice !== undefined) return { kind: "selected", slice };
     }
-    return { kind: "missing" };
+    return { kind: unknownSlices ? "unknown" : "missing" };
   }
   for (const architecture of COMPATIBLE_ARCHITECTURES[processFamily] ?? [
     processFamily,
