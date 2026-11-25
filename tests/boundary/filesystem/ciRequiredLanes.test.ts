@@ -340,10 +340,49 @@ it("requires each named SQLite compatibility test while retaining both directory
   const steps = z
     .array(z.object({ run: z.string().optional() }))
     .parse((await workflow("sqlite-runtime.yml")).jobs.sqlite?.steps);
-  expect(steps.some((step) => step.run === "npm run test:sqlite:run")).toBe(
-    true,
+  const sqlite = steps.find((step) =>
+    step.run?.includes("npm run test:sqlite:run"),
   );
+  expect(sqlite?.run?.trim().split("\n")).toEqual([
+    "npm run --if-present pretest:sqlite",
+    "npm run test:sqlite:run",
+    "npm run --if-present posttest:sqlite",
+  ]);
 });
+
+it.skipIf(process.platform === "win32").each([
+  ["pretest:sqlite", 1],
+  ["test:sqlite:run", 2],
+  ["posttest:sqlite", 3],
+  ["", 3],
+] as const)(
+  "stops the SQLite lane when an npm command fails (%s)",
+  async (failure, count) => {
+    const steps = z
+      .array(z.object({ run: z.string().optional() }))
+      .parse((await workflow("sqlite-runtime.yml")).jobs.sqlite?.steps);
+    const run = z
+      .string()
+      .parse(
+        steps.find((step) => step.run?.includes("npm run test:sqlite:run"))
+          ?.run,
+      );
+    const result = await executeWorkflowFixture("bash", [
+      "-e",
+      "-c",
+      'failure=$1; npm() { printf "%s\n" "${!#}"; [[ "${!#}" != "$failure" ]]; }\n' +
+        run,
+      "sqlite-fixture",
+      failure,
+    ]).catch((cause: unknown) =>
+      z.object({ code: z.number(), stdout: z.string() }).parse(cause),
+    );
+    expect(result.stdout.trim().split("\n")).toEqual(
+      ["pretest:sqlite", "test:sqlite:run", "posttest:sqlite"].slice(0, count),
+    );
+    expect("code" in result ? result.code : 0).toBe(failure ? 1 : 0);
+  },
+);
 
 it("exports every canonical scope with read authority for admission and keeps telemetry outside the gate", async () => {
   const { jobs } = await workflow();
