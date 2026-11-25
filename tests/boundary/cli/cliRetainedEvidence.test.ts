@@ -3,6 +3,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  readFile,
   readdir,
   realpath,
   stat,
@@ -10,7 +11,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { expect, it } from "vitest";
 
 import { inspectAnalysisView } from "../../../src/application/analysisView/AnalysisViewService.js";
@@ -31,6 +32,8 @@ import {
   parseEvidence,
   withEvidenceCallerInputPath,
 } from "../../../src/domain/evidence.js";
+import { parseEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
+import { digestCanonicalValue } from "../../../src/domain/canonicalDigest.js";
 import { ok } from "../../../src/domain/result.js";
 import { HOST_PLATFORM } from "../../../src/platform/HostPlatform.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -114,7 +117,10 @@ it("keeps an over-budget CLI result in the private cache, pages it, and reuses i
   const id = first.delivery.evidence_id;
   const sha256 = first.evidence_bundle!.record_sha256;
   // Paths name the cache directory as the filesystem resolves it.
-  const path = join(await realpath(directory), `${sha256}.json`);
+  const path = first.evidence_bundle!.path;
+  expect(dirname(path)).toBe(await realpath(directory));
+  const bundle = parseEvidenceBundle(JSON.parse(await readFile(path, "utf8")));
+  expect(basename(path)).toBe(`${digestCanonicalValue(bundle)}.json`);
   expect(first.delivery).toMatchObject({ retained: "cache-file" });
   expect(first.evidence_bundle).toEqual({
     path,
@@ -142,7 +148,7 @@ it("keeps an over-budget CLI result in the private cache, pages it, and reuses i
   };
   const complete = await run("--detail", "complete");
   expect(JSON.parse(text)).toEqual(complete);
-  // The file is named by the digest of the complete record's exact JSON.
+  // The receipt still identifies the complete record independently of its closure.
   expect(sha256).toBe(
     createHash("sha256").update(JSON.stringify(complete)).digest("hex"),
   );
@@ -159,7 +165,7 @@ it("keeps an over-budget CLI result in the private cache, pages it, and reuses i
   const after = await stat(path);
   expect(after.ino).toBe(before.ino);
   expect(after.mtimeMs).toBeGreaterThan(before.mtimeMs);
-  expect(await files(directory)).toEqual([`${sha256}.json`]);
+  expect(await files(directory)).toEqual([basename(path)]);
 
   // Paging it through the CLI uses it too, and renews its age again.
   await utimes(path, old, old);
@@ -176,7 +182,7 @@ it("keeps an over-budget CLI result in the private cache, pages it, and reuses i
   const spelled = await runOn(relative(process.cwd(), target));
   expect(spelled.evidence_bundle!.record_sha256).not.toBe(sha256);
   expect((await files(directory)).sort()).toEqual(
-    [`${sha256}.json`, `${spelled.evidence_bundle!.record_sha256}.json`].sort(),
+    [basename(path), basename(spelled.evidence_bundle!.path)].sort(),
   );
 });
 

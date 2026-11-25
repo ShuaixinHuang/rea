@@ -44,6 +44,9 @@ import {
 } from "./projectCliAnalysisResult.js";
 import { bindCliEvidenceCallerPath } from "./cliEvidenceCallerPath.js";
 import type { AnalysisResultWithSources } from "../application/investigation/recordEvidenceSources.js";
+import type { EvidenceBundle } from "../domain/evidenceBundle.js";
+import { digestCanonicalValue } from "../domain/canonicalDigest.js";
+import { errorMessage } from "../kernel/errorMessage.js";
 
 /** How one CLI invocation publishes its Evidence. */
 interface CliEvidencePublication {
@@ -306,10 +309,31 @@ const retainOverBudgetEvidence = async (
   // so neither its path nor a failure naming it reaches the output.
   if (revealsSensitiveValue(retention.directory, input))
     return err({ reason: sensitiveCachePathReason });
-  const { retainCliEvidence, retainedEvidenceDigest } =
-    await import("./cliEvidenceRetention.js");
+  const {
+    retainCliEvidence,
+    retainedEvidenceDigest,
+    cliEvidenceRetentionSizeFailure,
+  } = await import("./cliEvidenceRetention.js");
+  const sizeFailure = cliEvidenceRetentionSizeFailure(
+    completeBytes,
+    retention.capBytes,
+  );
+  if (sizeFailure !== undefined) {
+    clearCliEvidencePublication();
+    return err(sizeFailure);
+  }
+  const bundle = await publicationBundle(complete, input).catch(
+    (cause: unknown) =>
+      err({
+        message: `The retained-Evidence cache could not be used: ${errorMessage(cause)}`,
+      }),
+  );
+  if (!bundle.ok) {
+    clearCliEvidencePublication();
+    return err({ reason: bundle.error.message });
+  }
   const kept = await retainCliEvidence<AnalysisError>({
-    sha256: retainedEvidenceDigest(complete),
+    sha256: digestCanonicalValue(bundle.value),
     completeBytes,
     retention,
     rejectResolvedDirectory: (resolved) =>
@@ -323,6 +347,7 @@ const retainOverBudgetEvidence = async (
         path,
         input,
         true,
+        bundle.value,
       );
       if (published.ok) {
         const { bytes } = published.value.receipt as { readonly bytes: number };
@@ -351,9 +376,8 @@ const retainOverBudgetEvidence = async (
   }
   const receipt = {
     ...bundleReceipt(kept.value.path, kept.value.bytes, input),
-    // The cache key: the digest of the complete record, not of the file,
-    // which is the bundle that holds it.
-    record_sha256: kept.value.sha256,
+    // Record identity remains independent of its captured source closure.
+    record_sha256: retainedEvidenceDigest(complete),
   };
   recordCliEvidencePublication(receipt);
   return ok({ path: kept.value.path, receipt });
@@ -491,6 +515,7 @@ const publishDeliveredEvidence = async (
   evidenceOutput: string,
   input: CliEvidencePublication,
   overBudget = false,
+  preparedBundle?: EvidenceBundle,
 ): Promise<
   Result<
     {
@@ -537,36 +562,16 @@ const publishDeliveredEvidence = async (
           complete.caller_input_paths,
         )
       : delivered.value;
-  const [
-    { analysisEvidenceSources },
-    { createEvidenceBundle, createImmutableEvidenceBundle },
-    { evidenceDeliveryCommitted, publishEvidenceDelivery },
-  ] = await Promise.all([
-    import("../application/AnalysisEvidenceSources.js"),
-    import("../domain/evidenceBundle.js"),
-    import("../application/EvidenceBundleCommands.js"),
-  ]);
-  const inspectionSources = analysisEvidenceSources(complete);
-  if (!inspectionSources.ok)
-    return err({
-      error: inspectionSources.error,
-      committed: false,
-      delivered: selected,
-    });
-  const records = [
-    ...new Map(
-      [...(input.sourceEvidence ?? []), ...inspectionSources.value].map(
-        (record) => [record.evidence_id, record],
-      ),
-    ).values(),
-  ];
-  // Sealed records already carry authentication; mutable producers still need
-  // the writer's allocation admission before publication.
-  const bundle = records.every(isImmutableEvidence)
-    ? createImmutableEvidenceBundle(records)
-    : createEvidenceBundle(records);
+  const bundle =
+    preparedBundle === undefined
+      ? await publicationBundle(complete, input)
+      : ok(preparedBundle);
+  if (!bundle.ok)
+    return err({ error: bundle.error, committed: false, delivered: selected });
+  const { evidenceDeliveryCommitted, publishEvidenceDelivery } =
+    await import("../application/EvidenceBundleCommands.js");
   const published = await publishEvidenceDelivery({
-    bundle,
+    bundle: bundle.value,
     complete,
     delivered: selected,
     outputPath: absoluteCallerPath(evidenceOutput),
@@ -588,6 +593,36 @@ const publishDeliveredEvidence = async (
     summarized,
     budgeted: budgeted !== undefined,
   });
+};
+
+/** One canonical publication snapshot owns both the cache key and the bytes written. */
+const publicationBundle = async (
+  complete: Evidence,
+  input: CliEvidencePublication,
+): Promise<Result<EvidenceBundle, AnalysisError>> => {
+  const [
+    { analysisEvidenceSources },
+    { createEvidenceBundle, createImmutableEvidenceBundle },
+  ] = await Promise.all([
+    import("../application/AnalysisEvidenceSources.js"),
+    import("../domain/evidenceBundle.js"),
+  ]);
+  const inspectionSources = analysisEvidenceSources(complete);
+  if (!inspectionSources.ok) return err(inspectionSources.error);
+  const records = [
+    ...new Map(
+      [...(input.sourceEvidence ?? []), ...inspectionSources.value].map(
+        (record) => [record.evidence_id, record],
+      ),
+    ).values(),
+  ];
+  // Sealed records already carry authentication; mutable producers still need
+  // the writer's allocation admission before publication.
+  return ok(
+    records.every(isImmutableEvidence)
+      ? createImmutableEvidenceBundle(records)
+      : createEvidenceBundle(records),
+  );
 };
 
 /** Whether a caller-selected path contains an excluded sensitive literal. */

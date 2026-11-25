@@ -366,9 +366,9 @@ not, the work is never refused or truncated:
     The directory is created `0700` and must be a real directory the user
     owns, never a symbolic link; files are created exclusively as `0600` by
     the Evidence bundle writer.
-  - **Key and lifetime:** each file is named by the SHA-256 of the complete
-    record's exact JSON, so it covers every input and caller choice the
-    record holds, including caller paths the Evidence ID leaves out. A
+  - **Key and lifetime:** each file is named by the SHA-256 of the canonical
+    bundle's exact JSON, so it covers the complete record and its captured
+    source closure, including caller paths their Evidence IDs leave out. A
     repeat run reuses the file and never rewrites it. A repeat run, or a
     `rea inspect-analysis-view` read of the file, renews its age. Each
     retention removes records unused for 7 days, then the least recently

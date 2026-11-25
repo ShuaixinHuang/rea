@@ -35,7 +35,7 @@ export const cliRetainedEvidenceDirectory = (
 ): string => reaCacheDirectory(environment, platform, "evidence");
 
 /**
- * The cache key: the SHA-256 of the complete record's exact JSON. The
+ * The receipt's record_sha256: the SHA-256 of the complete record's exact JSON. The
  * Evidence ID leaves out caller-input paths and local subject metadata, so
  * two runs with the same semantic result can differ in what they record;
  * hashing the whole record keeps each invocation's own record.
@@ -46,7 +46,7 @@ export const retainedEvidenceDigest = (evidence: Evidence): string => {
   return hash.digest("hex");
 };
 
-/** A retained bundle is named by its record's digest, so one record has one file. */
+/** A retained bundle is named by its complete publication digest. */
 const RETAINED_NAME = /^[0-9a-f]{64}\.json$/u;
 
 /** One retained record: its file, size, digest and whether it was already there. */
@@ -72,6 +72,17 @@ export interface RetentionStop<Committed> {
    */
   readonly fileRemains?: true;
 }
+
+/** Refuse an oversized record before preparing its publication bundle. */
+export const cliEvidenceRetentionSizeFailure = (
+  bytes: number,
+  capBytes: number,
+): RetentionStop<never> | undefined =>
+  bytes > capBytes
+    ? {
+        reason: `The complete Evidence (${String(bytes)} bytes) is larger than the retained-Evidence cache (${String(capBytes)} bytes).`,
+      }
+    : undefined;
 
 /** The writer's outcome: the bytes it published, that the name exists, or a stop. */
 export type RetentionWrite<Committed> = Result<
@@ -197,10 +208,11 @@ export const retainCliEvidence = async <Committed>(input: {
   const name = `${sha256}.json`;
   if (!RETAINED_NAME.test(name))
     return err({ reason: `${sha256} is not a SHA-256 digest.` });
-  const tooLarge = (bytes: number) => ({
-    reason: `The complete Evidence (${String(bytes)} bytes) is larger than the retained-Evidence cache (${String(capBytes)} bytes).`,
-  });
-  if (input.completeBytes > capBytes) return err(tooLarge(input.completeBytes));
+  const recordSizeFailure = cliEvidenceRetentionSizeFailure(
+    input.completeBytes,
+    capBytes,
+  );
+  if (recordSizeFailure !== undefined) return err(recordSizeFailure);
   const now = input.now ?? Date.now();
   try {
     const admitted = await admitDirectory(directory);
@@ -228,7 +240,10 @@ export const retainCliEvidence = async <Committed>(input: {
     let kept = await reuse();
     if (kept === undefined) {
       const written = await input.write(path);
-      if (written.ok && written.value.bytes > capBytes) {
+      const bundleSizeFailure = written.ok
+        ? cliEvidenceRetentionSizeFailure(written.value.bytes, capBytes)
+        : undefined;
+      if (bundleSizeFailure !== undefined) {
         // The bundle, with the sources it cites, outgrew the cache.
         try {
           await rm(path, { force: true });
@@ -238,7 +253,7 @@ export const retainCliEvidence = async <Committed>(input: {
             fileRemains: true,
           });
         }
-        return err(tooLarge(written.value.bytes));
+        return err(bundleSizeFailure);
       }
       // Another run kept the same record between the check and the write.
       kept = written.ok
