@@ -566,6 +566,49 @@ describe("tar header edge cases", () => {
     ]);
   });
 
+  it.each([false, true])(
+    "isolates local pax overrides while global records change (gzip: %s)",
+    async (compressed) => {
+      const global = (data: string) =>
+        tarMembers([{ name: "GlobalHead", type: "g", data }]);
+      const bytes = Buffer.concat([
+        global("15 uname=alice\n15 gname=group\n"),
+        tarMembers([
+          { name: "first.txt", data: "first" },
+          {
+            name: "local.txt",
+            data: "local",
+            pax: { uname: "bob", gname: "" },
+          },
+        ]),
+        global("12 uid=2000\n"),
+        tarMembers([{ name: "after.txt", data: "after" }]),
+        global("9 uname=\n"),
+        tarMembers([{ name: "cleared.txt", data: "cleared" }]),
+        end,
+      ]);
+      const result = await read(compressed ? gzipSync(bytes) : bytes);
+      expect(
+        result.entries.map(({ path, formatMetadata }) => ({
+          path,
+          ...formatMetadata,
+        })),
+      ).toMatchObject([
+        { path: "first.txt", uname: "alice", gname: "group", uid: 1000 },
+        { path: "local.txt", uname: "bob", gname: "staff", uid: 1000 },
+        { path: "after.txt", uname: "alice", gname: "group", uid: 2000 },
+        { path: "cleared.txt", uname: "builder", gname: "group", uid: 2000 },
+      ]);
+      expect([...result.contents]).toEqual([
+        ["first.txt", "first"],
+        ["local.txt", "local"],
+        ["after.txt", "after"],
+        ["cleared.txt", "cleared"],
+      ]);
+      expect(result.coverage[0]?.status).toBe("complete");
+    },
+  );
+
   it("treats a cut-off zero block as truncation, not an end marker", async () => {
     const result = await read(
       Buffer.concat([

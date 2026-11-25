@@ -137,15 +137,22 @@ const invalidPaxNumber = (records: TarPaxRecords): string | undefined => {
  * Apply pax records over earlier ones. POSIX: an empty value deletes the
  * keyword, so the header field applies again.
  */
+const applyPax = (
+  target: Map<string, string>,
+  records: TarPaxRecords,
+): void => {
+  for (const [key, value] of records)
+    if (value === "") target.delete(key);
+    else target.set(key, value);
+};
+
 const withPax = (
   base: TarPaxRecords,
   records: TarPaxRecords | undefined,
 ): TarPaxRecords => {
   if (records === undefined) return base;
   const merged = new Map(base);
-  for (const [key, value] of records)
-    if (value === "") merged.delete(key);
-    else merged.set(key, value);
+  applyPax(merged, records);
   return merged;
 };
 
@@ -219,7 +226,7 @@ export const walkTar = async (
   const dialects = new Set<TarHeaderDialect>();
   let paxHeaders = 0;
   const retained = new Budget(TAR_RETAINED_METADATA_BYTES);
-  let global: TarPaxRecords = new Map();
+  const global = new Map<string, string>();
   let local: TarPaxRecords | undefined;
   let longName: Uint8Array | undefined;
   let longLink: Uint8Array | undefined;
@@ -356,7 +363,7 @@ export const walkTar = async (
             break;
           }
           if (typeflag === TAR_TYPEFLAGS.paxGlobal)
-            global = withPax(global, pax.records);
+            applyPax(global, pax.records);
           else local = pax.records;
         } else {
           const end = data.indexOf(0);
