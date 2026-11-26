@@ -19,20 +19,23 @@ import { DWARF_UNITS_PROVIDER } from "../../domain/investigationProviders.js";
 import {
   DWARF_DECOMPRESSED_SECTION_ALLOWANCE,
   dwarfUnitsSchema,
-  MAX_INSPECT_DWARF_UNITS_FILE_BYTES,
   type DwarfUnitsReport,
+  dwarfUnitsFileLimit,
   type InspectDwarfUnitsInput,
 } from "../../domain/native/dwarfUnits.js";
 import { err, ok } from "../../domain/result.js";
 import {
   binaryResourceCeiling,
   BinaryResourceFailure,
+  isNativeStructureFailure,
 } from "../../domain/binaryContainer.js";
+import { nativeStructureConstraint } from "../nativeStructureConstraint.js";
 import { requireSelectedNativeImageFromReader } from "../../domain/apple/machoSliceSelection.js";
 import { parseDwarfCompileUnits } from "./DwarfUnitParser.js";
 import {
   DwarfSectionAllowanceFailure,
   locateDwarfSectionsFromHandle,
+  PE_SECTION_NAME_LIMIT,
   type DebugInfoAvailability,
   type LocatedDwarfImage,
 } from "./DwarfSections.js";
@@ -99,6 +102,7 @@ export class DwarfUnitsProvider {
               async () => {
                 await yieldArtifactRead(options?.signal);
               },
+              input.max_structure_bytes,
             );
             return dwarfUnitsSchema.parse(
               buildReport(
@@ -246,11 +250,6 @@ const limitationsFor = (
   return limitations;
 };
 
-const inputBudgetRemediation = (input: InspectDwarfUnitsInput): string =>
-  input.max_file_bytes >= MAX_INSPECT_DWARF_UNITS_FILE_BYTES
-    ? `The image exceeds the ${String(MAX_INSPECT_DWARF_UNITS_FILE_BYTES)}-byte input ceiling this operation accepts; select a smaller artifact.`
-    : `Raise max_file_bytes above ${String(input.max_file_bytes)} bytes or select a smaller artifact; the limit is the caller-selected input read budget.`;
-
 const dwarfUnitsFailure = (
   cause: unknown,
   input: InspectDwarfUnitsInput,
@@ -282,16 +281,24 @@ const dwarfUnitsFailure = (
               },
             ),
           );
+        if (isNativeStructureFailure(failure))
+          return nativeStructureConstraint(OPERATION, failure);
         if (failure instanceof BinaryResourceFailure)
           return parseLimitConstraint(
             OPERATION,
             "memory",
             failure,
-            fixedAllowanceOptions(
-              "The native structural decoding allowance",
-              "parser",
-              binaryResourceCeiling(failure),
-            ),
+            failure.failure.limit.name === PE_SECTION_NAME_LIMIT
+              ? fixedAllowanceOptions(
+                  "The PE section-name decoding allowance",
+                  "parser",
+                  binaryResourceCeiling(failure),
+                )
+              : fixedAllowanceOptions(
+                  "The retained DWARF section bound",
+                  "parser",
+                  binaryResourceCeiling(failure),
+                ),
           );
         return undefined;
       },
@@ -307,7 +314,7 @@ const dwarfUnitsFailure = (
           ),
           {
             retryable: false,
-            remediationAction: inputBudgetRemediation(input),
+            limit: dwarfUnitsFileLimit(input.max_file_bytes),
           },
         ),
     }),

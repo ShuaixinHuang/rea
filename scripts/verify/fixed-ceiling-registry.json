@@ -47,6 +47,11 @@
       "class": "pending",
       "issue": 14235,
       "reason": "APK signing-block pair, signer, entry and report counts are REA resource policies, not APK Signature Scheme maxima."
+    },
+    "\"The APK signature input allowance\"": {
+      "class": "pending",
+      "issue": 14235,
+      "reason": "The 512 MiB whole-APK read is a resource policy; the content digest needs the whole file."
     }
   },
   "src/apktool/ApktoolConfiguration.ts": {
@@ -118,18 +123,10 @@
       "reason": "Relays the live runtime-retention allowance its caller names."
     }
   },
-  "src/browser/history/playwrightTrace/PlaywrightTraceDecoder.ts": {
-    "`The Playwright trace archive input allowance of ${String(PLAYWRIGHT_TRACE_LIMITS.archiveBytes)} bytes`": {
-      "class": "pending",
-      "issue": 14236,
-      "reason": "Playwright trace archive input and record parser allowances are resource policies."
-    }
-  },
-  "src/browser/history/playwrightTrace/TraceStream.ts": {
-    "nesting ? \"The Playwright trace record nesting allowance\" : \"The Playwright trace record parser allowance\"": {
-      "class": "pending",
-      "issue": 14236,
-      "reason": "Playwright trace archive input and record parser allowances are resource policies."
+  "src/browser/history/playwrightTrace/TraceFailure.ts": {
+    "\"The Playwright trace ZIP expansion allowance (derived from the archive size)\"": {
+      "class": "derived",
+      "reason": "The ZIP reader's plaintext-work budget is derived from the admitted trace archive's own size, which trace_limits.archive_bytes bounds."
     }
   },
   "src/domain/analysisErrorCore.ts": {
@@ -147,9 +144,8 @@
   },
   "src/domain/apiContract/GraphqlDocuments.ts": {
     "`The GraphQL AST nesting allowance of ${String(GRAPHQL_CONTRACT_LIMITS.astDepth)} levels`": {
-      "class": "pending",
-      "issue": 14236,
-      "reason": "GraphQL AST nesting depth is a resource policy unless a recursion-stack reason is stated."
+      "class": "representation",
+      "reason": "Bounds the parsed AST depth that REA's recursive selection-set generators (collectSelections, nested yield*) and graphql-js's recursive print and schema building walk, so a deeply nested document cannot exhaust the call stack or make nested generator delegation quadratic."
     }
   },
   "src/domain/fixedAllowanceRemediation.ts": {
@@ -169,13 +165,6 @@
       "class": "pending",
       "issue": 14235,
       "reason": "Electron fuse input bytes and sentinel inventory are resource policies."
-    }
-  },
-  "src/erlang/BeamProvider.ts": {
-    "\"BEAM table row ceiling\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "The BEAM table row ceiling is a resource policy."
     }
   },
   "src/flutter/FlutterBuildProvider.ts": {
@@ -201,6 +190,18 @@
       "class": "pending",
       "issue": 14235,
       "reason": "Projects the shared native structural decoding allowance (BinaryResourceFailure), a resource policy."
+    }
+  },
+  "src/gpu/GpuCodeObjectsProvider.ts": {
+    "\"The GPU object allowance\"": {
+      "class": "pending",
+      "issue": 14235,
+      "reason": "The 128 MiB GPU object read allowance is a resource policy without a control."
+    },
+    "\"The GPU parser allowance\"": {
+      "class": "pending",
+      "issue": 14235,
+      "reason": "AMDGPU metadata, HIP bundle, CUDA and PTX decode allowances (8 MiB to 512 MiB, visit and token counts) are resource policies without a control."
     }
   },
   "src/ida/IdaMcpConnection.ts": {
@@ -235,6 +236,12 @@
       "reason": "Kuna's buffered function-text allowance is a resource policy."
     }
   },
+  "src/native/LldbCallTracer.ts": {
+    "\"The combined LLDB result representation ceiling\"": {
+      "class": "representation",
+      "reason": "The combined tracer result is read into one Buffer and decoded to one string; above min(buffer.constants.MAX_LENGTH, buffer.constants.MAX_STRING_LENGTH) the running Node cannot represent it."
+    }
+  },
   "src/native/NativeCommandAnalysisError.ts": {
     "\"The native command output capture allowance\"": {
       "class": "pending",
@@ -256,10 +263,14 @@
     }
   },
   "src/native/dwarf/DwarfUnitsProvider.ts": {
-    "\"The native structural decoding allowance\"": {
+    "\"The PE section-name decoding allowance\"": {
       "class": "pending",
       "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
+      "reason": "The 65,536-byte per-name COFF string-table decode is a resource policy; the aggregate is max_structure_bytes."
+    },
+    "\"The retained DWARF section bound\"": {
+      "class": "derived",
+      "reason": "Retained file-backed sections cannot exceed the admitted image size; the bound is the selected file and grows with it."
     },
     "DWARF_DECOMPRESSED_SECTION_ALLOWANCE": {
       "class": "pending",
@@ -268,35 +279,20 @@
     }
   },
   "src/native/elf/ElfDebugLinkProvider.ts": {
-    "\"The ELF structural decoding allowance\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
-    },
     "\"The whole-file debug candidate read allowance\"": {
       "class": "pending",
       "issue": 14235,
       "reason": "The streamed candidate is hashed in bounded chunks; its 0xffffffff-byte whole-file ceiling states no format reason, so it is a policy awaiting a control or a stated reason."
-    },
-    "ELF_NOTE_TEXT_ALLOWANCE": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
     }
   },
   "src/native/elf/ElfDependenciesProvider.ts": {
-    "\"The ELF structural decoding allowance\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "ELF dependency entry allowances are resource policies; the text budget is derived from the admitted image length."
-    },
     "text ? \"The ELF dependency text budget fixed by the admitted image length\" : `The ELF dependency ${limit.name} allowance`": {
       "class": "pending",
       "issue": 14235,
       "reason": "ELF dependency entry allowances are resource policies; the text budget is derived from the admitted image length."
     }
   },
-  "src/native/elf/ElfNotesProvider.ts": {
+  "src/native/elf/elfNoteLimitConstraint.ts": {
     "ELF_NOTE_TEXT_ALLOWANCE": {
       "class": "pending",
       "issue": 14235,
@@ -304,17 +300,10 @@
     }
   },
   "src/native/elf/ElfUnwindRangesProvider.ts": {
-    "\"The ELF structural decoding allowance\"": {
+    "\"The ELF unwind symbol-name text allowance\"": {
       "class": "pending",
       "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
-    }
-  },
-  "src/native/elf/KernelModuleProvider.ts": {
-    "\"The ELF structural decoding allowance\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
+      "reason": "The 16 MiB symbol-name text decoded for one returned page is a resource policy; a smaller page (limit) stays within it."
     }
   },
   "src/native/exports/NativeExportsProvider.ts": {
@@ -335,10 +324,10 @@
     }
   },
   "src/native/hardening/BinaryHardeningProvider.ts": {
-    "\"The binary hardening structural allowance\"": {
+    "\"The binary hardening table-entry allowance\"": {
       "class": "pending",
       "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
+      "reason": "The ELF dynamic table entry count is a resource policy; symbol-table excess already degrades to unresolved rows."
     }
   },
   "src/native/initializers/NativeInitializersProvider.ts": {
@@ -362,9 +351,8 @@
       "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
     },
     "\"The native plist nesting allowance\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "Native reader structural, text and inventory allowances are resource policies without a per-call control."
+      "class": "representation",
+      "reason": "The decoded plist value nests inside Evidence JSON, whose depth is bounded by MAX_JSON_DEPTH before recursive result cloning; three levels are reserved for the report envelope (MAX_NATIVE_PLIST_NESTING_DEPTH = MAX_JSON_DEPTH - 3)."
     },
     "`The native ${encoding} plist decode allowance`": {
       "class": "pending",
@@ -398,18 +386,18 @@
       "reason": "PE structural and retained-text allowances are resource policies (the PE file-size admission is #14167)."
     }
   },
-  "src/native/pe/PeUnwindRangesProvider.ts": {
-    "\"The PE exception-directory entry allowance\"": {
-      "class": "pending",
-      "issue": 14235,
-      "reason": "The 2,097,152-entry typed-array allowance bounds decoder memory like the other PE structural allowances; it is a resource policy pending #14235."
-    }
-  },
   "src/native/pe/PeResourcesProvider.ts": {
     "\"The PE resource metadata allowance\"": {
       "class": "pending",
       "issue": 14235,
       "reason": "PE resource metadata retention is a resource policy (the PE file-size admission is #14167)."
+    }
+  },
+  "src/native/pe/PeUnwindRangesProvider.ts": {
+    "\"The PE exception-directory entry allowance\"": {
+      "class": "pending",
+      "issue": 14235,
+      "reason": "The 2,097,152-entry typed-array allowance bounds decoder memory like the other PE structural allowances; it is a resource policy pending #14235."
     }
   },
   "src/pcap/PcapCommand.ts": {
@@ -462,9 +450,19 @@
   },
   "src/sqlite/SqliteDatabaseFailures.ts": {
     "`The SQLite worker diagnostic capture allowance of ${String(SQLITE_DATABASE_LIMITS.diagnosticBytes)} bytes (this release has no runtime override; worker_timeout_ms does not raise it)`": {
+      "class": "protocol",
+      "reason": "Bounds stdout and stderr of REA's own SQLite worker, which answers through its reply file; only startup failures and runtime warnings reach these streams, and no database content or analysis result passes through them."
+    }
+  },
+  "src/sqlite/SqliteDatabaseWorkerExecution.ts": {
+    "\"The SQLite value/record, SQL statement and worker reply allowance\"": {
       "class": "pending",
       "issue": 14237,
-      "reason": "SQLite worker diagnostic capture is a producer budget."
+      "reason": "The 16 MiB value/record, statement and worker reply allowance bounds what the parent decodes from REA's SQLite worker; it is a resource policy that should become a per-call control together with the worker heap."
+    },
+    "\"SQLite's result-column limit for this connection\"": {
+      "class": "format",
+      "reason": "SQLite's own result-column limit (SQLITE_LIMIT_COLUMN) for the private connection, reported by the engine with the reply; REA does not set it."
     }
   }
 }
