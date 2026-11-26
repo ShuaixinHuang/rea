@@ -140,10 +140,6 @@ export const browserScenarioEventFamilySchema = z.enum([
   "popups",
   "downloads",
 ]);
-export type BrowserScenarioEventFamily = z.infer<
-  typeof browserScenarioEventFamilySchema
->;
-
 const eventBase = {
   sequence: z.int().min(1),
   step_index: z.int().min(0),
