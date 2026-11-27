@@ -20,8 +20,7 @@ export const DEFAULT_GHIDRA_CHECKPOINT_SAVE_WAIT_MS = 30_000;
  * One poll interval. A shorter wait would report the checkpoint busy without
  * observing the lease a second time, which is a refusal and not a wait.
  */
-export const MINIMUM_GHIDRA_CHECKPOINT_SAVE_WAIT_MS =
-  GHIDRA_CHECKPOINT_SAVE_POLL_MS;
+const MINIMUM_GHIDRA_CHECKPOINT_SAVE_WAIT_MS = GHIDRA_CHECKPOINT_SAVE_POLL_MS;
 
 /**
  * Ten minutes. The wait runs inside `close_binary` and the first save of a

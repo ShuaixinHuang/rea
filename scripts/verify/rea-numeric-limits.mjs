@@ -1202,7 +1202,7 @@ const restartOnlyBounds = (owners) => {
       ),
       exportedNumber(
         owners.ghidraCheckpointSaveWait,
-        "MINIMUM_GHIDRA_CHECKPOINT_SAVE_WAIT_MS",
+        "GHIDRA_CHECKPOINT_SAVE_POLL_MS",
       ),
       exportedNumber(
         owners.ghidraCheckpointSaveWait,
