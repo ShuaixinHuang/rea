@@ -50,6 +50,9 @@ Repeated encodings of the singular old/new `PartitionInfo` messages merge
 their fields under Protobuf rules. A later size-only or empty message does
 not erase an earlier declared hash; a repeated scalar field keeps its last
 value. The resulting size and hash feed both inventory and extraction.
+Singular scalar and operation hash checks use the final value after all
+occurrences have been read; an overwritten value does not reject the payload.
+`block_size` and `minor_version` decode as the schema's unsigned 32-bit fields.
 
 Metadata and payload signature blobs are counted from the `Signatures`
 protobuf. A payload signature is declared when both `signatures_offset` and

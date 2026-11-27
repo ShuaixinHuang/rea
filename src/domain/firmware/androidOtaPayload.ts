@@ -331,7 +331,9 @@ export interface AndroidOtaPayload {
   readonly limitations: readonly string[];
 }
 
-const toBigInt = (value: bigint | string | number): bigint =>
+type WireInteger = bigint | string | number;
+
+const toBigInt = (value: WireInteger): bigint =>
   typeof value === "bigint"
     ? value
     : typeof value === "number"
@@ -339,7 +341,7 @@ const toBigInt = (value: bigint | string | number): bigint =>
       : BigInt(value);
 
 const asSafeUint = (
-  value: bigint | string | number,
+  value: WireInteger,
   label: string,
 ): Result<number, AndroidOtaPayloadParseError> => {
   const numeric = toBigInt(value);
@@ -348,7 +350,7 @@ const asSafeUint = (
   return ok(Number(numeric));
 };
 
-const asSafeInt = (value: bigint | string | number): number | null => {
+const asSafeInt = (value: WireInteger): number | null => {
   const numeric = toBigInt(value);
   if (
     numeric < BigInt(Number.MIN_SAFE_INTEGER) ||
@@ -380,6 +382,7 @@ const unwrap = <T>(result: Result<T, AndroidOtaPayloadParseError>): T => {
 const walk = (
   bytes: Uint8Array,
   visit: (field: number, wire: WireType, reader: BinaryReader) => void,
+  finish?: () => void,
 ): Result<undefined, AndroidOtaPayloadParseError> => {
   try {
     const reader = new BinaryReader(bytes);
@@ -387,6 +390,9 @@ const walk = (
       const [field, wire] = reader.tag();
       visit(field, wire, reader);
     }
+    // Singular fields may be overwritten later in this message. Interpret
+    // their final values only after the wire reader consumed every field.
+    finish?.();
     return ok(undefined);
   } catch (cause: unknown) {
     return err(
@@ -480,7 +486,7 @@ interface OperationDraft {
 }
 
 interface PartitionInfoDraft {
-  size: number | null;
+  size: WireInteger | null;
   hashHex: string | null;
 }
 
@@ -489,8 +495,8 @@ interface PartitionDraft {
   runPostinstall: boolean | null;
   postinstallPath: string | null;
   filesystemType: string | null;
-  oldPartitionInfo: PartitionInfoDraft | null;
-  newPartitionInfo: PartitionInfoDraft;
+  oldPartitionInfo: AndroidOtaPartitionInfo | null;
+  newPartitionInfo: AndroidOtaPartitionInfo;
   operations: OperationDraft[];
   version: string | null;
   mergeOperationCount: number;
@@ -531,28 +537,30 @@ const decodeExtent = (
   bytes: Uint8Array,
 ): Result<ExtentDraft, AndroidOtaPayloadParseError> => {
   const extent: ExtentDraft = { startBlock: null, numBlocks: 0 };
-  const walked = walk(bytes, (field, wire, reader) => {
-    if (field === 1 && wire === WireType.Varint) {
-      const start = toBigInt(reader.uint64());
+  let startBlock: WireInteger | null = null;
+  let numBlocks: WireInteger = 0;
+  const walked = walk(
+    bytes,
+    (field, wire, reader) => {
+      if (field === 1 && wire === WireType.Varint) {
+        startBlock = reader.uint64();
+        return;
+      }
+      if (field === 2 && wire === WireType.Varint) {
+        numBlocks = reader.uint64();
+        return;
+      }
+      reader.skip(wire);
+    },
+    () => {
+      const start = startBlock === null ? null : toBigInt(startBlock);
       extent.startBlock =
-        start === 0xffff_ffff_ffff_ffffn ? null : Number(start);
-      if (
-        extent.startBlock !== null &&
-        !Number.isSafeInteger(extent.startBlock)
-      )
-        fail(
-          malformed("extent start_block is not an exact nonnegative extent"),
-        );
-      return;
-    }
-    if (field === 2 && wire === WireType.Varint) {
-      extent.numBlocks = unwrap(
-        asSafeUint(reader.uint64(), "extent num_blocks"),
-      );
-      return;
-    }
-    reader.skip(wire);
-  });
+        start === null || start === 0xffff_ffff_ffff_ffffn
+          ? null
+          : unwrap(asSafeUint(start, "extent start_block"));
+      extent.numBlocks = unwrap(asSafeUint(numBlocks, "extent num_blocks"));
+    },
+  );
   return walked.ok ? ok(extent) : walked;
 };
 
@@ -564,7 +572,7 @@ const decodePartitionInfo = (
   // in this occurrence replace earlier values; an empty message erases none.
   const walked = walk(bytes, (field, wire, reader) => {
     if (field === 1 && wire === WireType.Varint) {
-      info.size = unwrap(asSafeUint(reader.uint64(), "partition size"));
+      info.size = reader.uint64();
       return;
     }
     if (field === 2 && wire === WireType.LengthDelimited) {
@@ -575,6 +583,15 @@ const decodePartitionInfo = (
   });
   return walked.ok ? ok(info) : walked;
 };
+
+/** All occurrences of a singular PartitionInfo merge before its size is admitted. */
+const finishPartitionInfo = (
+  info: PartitionInfoDraft,
+): AndroidOtaPartitionInfo => ({
+  size:
+    info.size === null ? null : unwrap(asSafeUint(info.size, "partition size")),
+  hashHex: info.hashHex,
+});
 
 const decodeOperation = (
   bytes: Uint8Array,
@@ -589,44 +606,57 @@ const decodeOperation = (
     srcExtents: [],
     dstExtents: [],
   };
-  const walked = walk(bytes, (field, wire, reader) => {
-    if (field === 1 && wire === WireType.Varint) {
-      operation.hasType = true;
-      operation.typeCode = reader.int32();
+  let dataOffset: WireInteger = 0;
+  let dataLength: WireInteger = 0;
+  let dataHash: Uint8Array | null = null;
+  const walked = walk(
+    bytes,
+    (field, wire, reader) => {
+      if (field === 1 && wire === WireType.Varint) {
+        operation.hasType = true;
+        operation.typeCode = reader.int32();
+        return;
+      }
+      if (field === 2 && wire === WireType.Varint) {
+        dataOffset = reader.uint64();
+        return;
+      }
+      if (field === 3 && wire === WireType.Varint) {
+        dataLength = reader.uint64();
+        return;
+      }
+      if ((field === 4 || field === 6) && wire === WireType.LengthDelimited) {
+        if (extentTotal.count >= ANDROID_OTA_MAX_EXTENTS_TOTAL)
+          fail(
+            capacity("extent total", ANDROID_OTA_MAX_EXTENTS_TOTAL, "extent"),
+          );
+        extentTotal.count += 1;
+        (field === 4 ? operation.srcExtents : operation.dstExtents).push(
+          unwrap(decodeExtent(reader.bytes())),
+        );
+        return;
+      }
+      if (field === 8 && wire === WireType.LengthDelimited) {
+        dataHash = reader.bytes();
+        return;
+      }
+      reader.skip(wire);
+    },
+    () => {
       if (operation.typeCode < 0)
         fail(malformed("InstallOperation type is negative"));
-      return;
-    }
-    if (field === 2 && wire === WireType.Varint) {
       operation.dataOffset = unwrap(
-        asSafeUint(reader.uint64(), "operation data_offset"),
+        asSafeUint(dataOffset, "operation data_offset"),
       );
-      return;
-    }
-    if (field === 3 && wire === WireType.Varint) {
       operation.dataLength = unwrap(
-        asSafeUint(reader.uint64(), "operation data_length"),
+        asSafeUint(dataLength, "operation data_length"),
       );
-      return;
-    }
-    if ((field === 4 || field === 6) && wire === WireType.LengthDelimited) {
-      if (extentTotal.count >= ANDROID_OTA_MAX_EXTENTS_TOTAL)
-        fail(capacity("extent total", ANDROID_OTA_MAX_EXTENTS_TOTAL, "extent"));
-      extentTotal.count += 1;
-      (field === 4 ? operation.srcExtents : operation.dstExtents).push(
-        unwrap(decodeExtent(reader.bytes())),
-      );
-      return;
-    }
-    if (field === 8 && wire === WireType.LengthDelimited) {
-      const digest = reader.bytes();
-      if (digest.length !== 0 && digest.length !== 32)
+      if (dataHash !== null && dataHash.length !== 0 && dataHash.length !== 32)
         fail(malformed("operation data_sha256_hash must be 32 bytes or empty"));
-      operation.dataHashHex = digest.length === 0 ? null : hex(digest);
-      return;
-    }
-    reader.skip(wire);
-  });
+      operation.dataHashHex =
+        dataHash === null || dataHash.length === 0 ? null : hex(dataHash);
+    },
+  );
   if (!walked.ok) return walked;
   if (!operation.hasType)
     return err(malformed("InstallOperation is missing type"));
@@ -644,84 +674,97 @@ const decodePartition = (
     postinstallPath: null,
     filesystemType: null,
     oldPartitionInfo: null,
-    newPartitionInfo: emptyPartitionInfo(),
+    newPartitionInfo: { size: null, hashHex: null },
     operations: [],
     version: null,
     mergeOperationCount: 0,
     estimateCowSize: null,
   };
-  const walked = walk(bytes, (field, wire, reader) => {
-    if (field === 1 && wire === WireType.LengthDelimited) {
-      partition.name = reader.string();
-      return;
-    }
-    if (field === 2 && wire === WireType.Varint) {
-      partition.runPostinstall = reader.bool();
-      return;
-    }
-    if (field === 3 && wire === WireType.LengthDelimited) {
-      partition.postinstallPath = reader.string();
-      return;
-    }
-    if (field === 4 && wire === WireType.LengthDelimited) {
-      partition.filesystemType = reader.string();
-      return;
-    }
-    if (field === 6 && wire === WireType.LengthDelimited) {
-      partition.oldPartitionInfo = unwrap(
-        decodePartitionInfo(
-          reader.bytes(),
-          partition.oldPartitionInfo ?? emptyPartitionInfo(),
-        ),
-      );
-      return;
-    }
-    if (field === 7 && wire === WireType.LengthDelimited) {
-      partition.newPartitionInfo = unwrap(
-        decodePartitionInfo(reader.bytes(), partition.newPartitionInfo),
-      );
-      return;
-    }
-    if (field === 8 && wire === WireType.LengthDelimited) {
-      if (partition.operations.length >= ANDROID_OTA_MAX_OPERATIONS)
-        fail(
-          capacity(
-            "operations per partition",
-            ANDROID_OTA_MAX_OPERATIONS,
-            "operation",
+  let oldPartitionInfo: PartitionInfoDraft | null = null;
+  const newPartitionInfo = emptyPartitionInfo();
+  let estimateCowSize: WireInteger | null = null;
+  const walked = walk(
+    bytes,
+    (field, wire, reader) => {
+      if (field === 1 && wire === WireType.LengthDelimited) {
+        partition.name = reader.string();
+        return;
+      }
+      if (field === 2 && wire === WireType.Varint) {
+        partition.runPostinstall = reader.bool();
+        return;
+      }
+      if (field === 3 && wire === WireType.LengthDelimited) {
+        partition.postinstallPath = reader.string();
+        return;
+      }
+      if (field === 4 && wire === WireType.LengthDelimited) {
+        partition.filesystemType = reader.string();
+        return;
+      }
+      if (field === 6 && wire === WireType.LengthDelimited) {
+        oldPartitionInfo = unwrap(
+          decodePartitionInfo(
+            reader.bytes(),
+            oldPartitionInfo ?? emptyPartitionInfo(),
           ),
         );
-      if (operationTotal.count >= ANDROID_OTA_MAX_OPERATIONS_TOTAL)
-        fail(
-          capacity(
-            "operation total",
-            ANDROID_OTA_MAX_OPERATIONS_TOTAL,
-            "operation",
-          ),
+        return;
+      }
+      if (field === 7 && wire === WireType.LengthDelimited) {
+        unwrap(decodePartitionInfo(reader.bytes(), newPartitionInfo));
+        return;
+      }
+      if (field === 8 && wire === WireType.LengthDelimited) {
+        if (partition.operations.length >= ANDROID_OTA_MAX_OPERATIONS)
+          fail(
+            capacity(
+              "operations per partition",
+              ANDROID_OTA_MAX_OPERATIONS,
+              "operation",
+            ),
+          );
+        if (operationTotal.count >= ANDROID_OTA_MAX_OPERATIONS_TOTAL)
+          fail(
+            capacity(
+              "operation total",
+              ANDROID_OTA_MAX_OPERATIONS_TOTAL,
+              "operation",
+            ),
+          );
+        partition.operations.push(
+          unwrap(decodeOperation(reader.bytes(), extentTotal)),
         );
-      partition.operations.push(
-        unwrap(decodeOperation(reader.bytes(), extentTotal)),
-      );
-      operationTotal.count += 1;
-      return;
-    }
-    if (field === 17 && wire === WireType.LengthDelimited) {
-      partition.version = reader.string();
-      return;
-    }
-    if (field === 18 && wire === WireType.LengthDelimited) {
+        operationTotal.count += 1;
+        return;
+      }
+      if (field === 17 && wire === WireType.LengthDelimited) {
+        partition.version = reader.string();
+        return;
+      }
+      if (field === 18 && wire === WireType.LengthDelimited) {
+        reader.skip(wire);
+        partition.mergeOperationCount += 1;
+        return;
+      }
+      if (field === 19 && wire === WireType.Varint) {
+        estimateCowSize = reader.uint64();
+        return;
+      }
       reader.skip(wire);
-      partition.mergeOperationCount += 1;
-      return;
-    }
-    if (field === 19 && wire === WireType.Varint) {
-      partition.estimateCowSize = unwrap(
-        asSafeUint(reader.uint64(), "estimate_cow_size"),
-      );
-      return;
-    }
-    reader.skip(wire);
-  });
+    },
+    () => {
+      partition.oldPartitionInfo =
+        oldPartitionInfo === null
+          ? null
+          : finishPartitionInfo(oldPartitionInfo);
+      partition.newPartitionInfo = finishPartitionInfo(newPartitionInfo);
+      partition.estimateCowSize =
+        estimateCowSize === null
+          ? null
+          : unwrap(asSafeUint(estimateCowSize, "estimate_cow_size"));
+    },
+  );
   if (!walked.ok) {
     const cause = walked.error;
     return err(cause);
@@ -740,32 +783,40 @@ const decodeGroup = (
     size: null,
     partitionNames: [],
   };
-  const walked = walk(bytes, (field, wire, reader) => {
-    if (field === 1 && wire === WireType.LengthDelimited) {
-      group.name = reader.string();
-      return;
-    }
-    if (field === 2 && wire === WireType.Varint) {
-      group.size = unwrap(
-        asSafeUint(reader.uint64(), "dynamic partition group size"),
-      );
-      return;
-    }
-    if (field === 3 && wire === WireType.LengthDelimited) {
-      if (partitionNameTotal.count >= ANDROID_OTA_MAX_GROUP_PARTITION_NAMES)
-        fail(
-          capacity(
-            "dynamic partition group partition_names total",
-            ANDROID_OTA_MAX_GROUP_PARTITION_NAMES,
-            "name",
-          ),
-        );
-      partitionNameTotal.count += 1;
-      group.partitionNames.push(reader.string());
-      return;
-    }
-    reader.skip(wire);
-  });
+  let size: WireInteger | null = null;
+  const walked = walk(
+    bytes,
+    (field, wire, reader) => {
+      if (field === 1 && wire === WireType.LengthDelimited) {
+        group.name = reader.string();
+        return;
+      }
+      if (field === 2 && wire === WireType.Varint) {
+        size = reader.uint64();
+        return;
+      }
+      if (field === 3 && wire === WireType.LengthDelimited) {
+        if (partitionNameTotal.count >= ANDROID_OTA_MAX_GROUP_PARTITION_NAMES)
+          fail(
+            capacity(
+              "dynamic partition group partition_names total",
+              ANDROID_OTA_MAX_GROUP_PARTITION_NAMES,
+              "name",
+            ),
+          );
+        partitionNameTotal.count += 1;
+        group.partitionNames.push(reader.string());
+        return;
+      }
+      reader.skip(wire);
+    },
+    () => {
+      group.size =
+        size === null
+          ? null
+          : unwrap(asSafeUint(size, "dynamic partition group size"));
+    },
+  );
   if (!walked.ok) return walked;
   if (group.name === undefined)
     return err(malformed("DynamicPartitionGroup is missing name"));
@@ -882,64 +933,78 @@ const decodeManifest = (
   };
   const operationTotal = { count: 0 };
   const extentTotal = { count: 0 };
-  const walked = walk(bytes, (field, wire, reader) => {
-    if (field === 3 && wire === WireType.Varint) {
-      const size = unwrap(asSafeUint(reader.uint64(), "block_size"));
-      if (size === 0) fail(malformed("manifest block_size is zero"));
-      draft.blockSize = size;
-      return;
-    }
-    if (field === 4 && wire === WireType.Varint) {
-      draft.signaturesOffset = unwrap(
-        asSafeUint(reader.uint64(), "signatures_offset"),
-      );
-      return;
-    }
-    if (field === 5 && wire === WireType.Varint) {
-      draft.signaturesSize = unwrap(
-        asSafeUint(reader.uint64(), "signatures_size"),
-      );
-      return;
-    }
-    if (field === 12 && wire === WireType.Varint) {
-      draft.minorVersion = unwrap(asSafeUint(reader.uint64(), "minor_version"));
-      return;
-    }
-    if (field === 13 && wire === WireType.LengthDelimited) {
-      if (draft.partitions.length >= ANDROID_OTA_MAX_PARTITIONS)
-        fail(
-          capacity("partition count", ANDROID_OTA_MAX_PARTITIONS, "partition"),
+  let signaturesOffset: WireInteger | null = null;
+  let signaturesSize: WireInteger | null = null;
+  const walked = walk(
+    bytes,
+    (field, wire, reader) => {
+      if (field === 3 && wire === WireType.Varint) {
+        draft.blockSize = reader.uint32();
+        return;
+      }
+      if (field === 4 && wire === WireType.Varint) {
+        signaturesOffset = reader.uint64();
+        return;
+      }
+      if (field === 5 && wire === WireType.Varint) {
+        signaturesSize = reader.uint64();
+        return;
+      }
+      if (field === 12 && wire === WireType.Varint) {
+        draft.minorVersion = reader.uint32();
+        return;
+      }
+      if (field === 13 && wire === WireType.LengthDelimited) {
+        if (draft.partitions.length >= ANDROID_OTA_MAX_PARTITIONS)
+          fail(
+            capacity(
+              "partition count",
+              ANDROID_OTA_MAX_PARTITIONS,
+              "partition",
+            ),
+          );
+        draft.partitions.push(
+          unwrap(decodePartition(reader.bytes(), operationTotal, extentTotal)),
         );
-      draft.partitions.push(
-        unwrap(decodePartition(reader.bytes(), operationTotal, extentTotal)),
-      );
-      return;
-    }
-    if (field === 14 && wire === WireType.Varint) {
-      // Protobuf singular scalars keep the last occurrence.
-      draft.maxTimestamp = reader.int64();
-      return;
-    }
-    if (field === 15 && wire === WireType.LengthDelimited) {
-      unwrap(decodeDynamicMetadata(reader.bytes(), draft));
-      return;
-    }
-    if (field === 16 && wire === WireType.Varint) {
-      draft.partialUpdate = reader.bool();
-      return;
-    }
-    if (field === 17 && wire === WireType.LengthDelimited) {
-      if (draft.apex.length >= ANDROID_OTA_MAX_APEX)
-        fail(capacity("apex_info count", ANDROID_OTA_MAX_APEX, "entry"));
-      draft.apex.push(unwrap(decodeApex(reader.bytes())));
-      return;
-    }
-    if (field === 18 && wire === WireType.LengthDelimited) {
-      draft.securityPatchLevel = reader.string();
-      return;
-    }
-    reader.skip(wire);
-  });
+        return;
+      }
+      if (field === 14 && wire === WireType.Varint) {
+        // Protobuf singular scalars keep the last occurrence.
+        draft.maxTimestamp = reader.int64();
+        return;
+      }
+      if (field === 15 && wire === WireType.LengthDelimited) {
+        unwrap(decodeDynamicMetadata(reader.bytes(), draft));
+        return;
+      }
+      if (field === 16 && wire === WireType.Varint) {
+        draft.partialUpdate = reader.bool();
+        return;
+      }
+      if (field === 17 && wire === WireType.LengthDelimited) {
+        if (draft.apex.length >= ANDROID_OTA_MAX_APEX)
+          fail(capacity("apex_info count", ANDROID_OTA_MAX_APEX, "entry"));
+        draft.apex.push(unwrap(decodeApex(reader.bytes())));
+        return;
+      }
+      if (field === 18 && wire === WireType.LengthDelimited) {
+        draft.securityPatchLevel = reader.string();
+        return;
+      }
+      reader.skip(wire);
+    },
+    () => {
+      if (draft.blockSize === 0) fail(malformed("manifest block_size is zero"));
+      draft.signaturesOffset =
+        signaturesOffset === null
+          ? null
+          : unwrap(asSafeUint(signaturesOffset, "signatures_offset"));
+      draft.signaturesSize =
+        signaturesSize === null
+          ? null
+          : unwrap(asSafeUint(signaturesSize, "signatures_size"));
+    },
+  );
   if (!walked.ok) return walked;
   draft.operationTotal = operationTotal.count;
   return ok(draft);

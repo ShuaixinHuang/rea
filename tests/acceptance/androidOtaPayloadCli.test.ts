@@ -14,9 +14,56 @@ import {
   androidOtaSignatureBlob,
   buildAndroidOtaPayload,
   deltaAndroidOtaPayload,
+  finalFieldAndroidOtaPayload,
   fullAndroidOtaPayload,
   v1AndroidOtaPayload,
 } from "../../src/domain/firmware/androidOtaPayload.fixture.js";
+
+cliTest(
+  "inspects and extracts final OTA protobuf values across nested messages",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-ota-final-fields-cli-");
+    const source = join(root, "payload.bin");
+    const bytes = finalFieldAndroidOtaPayload("all");
+    await writeFile(source, bytes);
+    const inspected = await cli.run({
+      arguments: ["inspect-artifact", source, "--json"],
+    });
+    expect(inspected.exitCode, inspected.stdout + inspected.stderr).toBe(0);
+    const inspection = artifactInspectionResultSchema.parse(
+      parseEvidence(inspected.json).normalized_result,
+    );
+    const graph = inspection.substeps[0]!.evidence.normalized_result;
+    expect(
+      graph.occurrences.find((row) => row.logical_path === ".")
+        ?.format_metadata,
+    ).toMatchObject({
+      block_size: 4,
+      minor_version: 0,
+      payload_kind: "full",
+      signatures_offset: 4,
+      signatures_size: 0,
+      dynamic_partition_groups: [{ name: "main", size: 4 }],
+    });
+    expect(
+      graph.occurrences.find((row) => row.logical_path === "system.img"),
+    ).toMatchObject({ hash_status: "verified" });
+    const extracted = await cli.run({
+      arguments: ["extract-artifact", source, "--json"],
+      environment: { TMPDIR: root, TMP: root, TEMP: root },
+    });
+    expect(extracted.exitCode, extracted.stdout + extracted.stderr).toBe(0);
+    const result = artifactExtractionResultSchema.parse(
+      parseEvidence(extracted.json).normalized_result,
+    );
+    expect(
+      (await readFile(join(result.output_root, "system.img"))).equals(
+        Buffer.from("DATA"),
+      ),
+    ).toBe(true);
+    expect((await readFile(source)).equals(bytes)).toBe(true);
+  },
+);
 
 cliTest.for([
   { signaturesOffset: 0, signaturesSize: null },

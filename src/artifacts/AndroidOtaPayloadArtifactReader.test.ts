@@ -5,9 +5,14 @@ import { BinaryWriter, WireType } from "@bufbuild/protobuf/wire";
 import { expect, it } from "vitest";
 
 import { AndroidOtaPayloadArtifactReader } from "./AndroidOtaPayloadArtifactReader.js";
-import { ArtifactEntryContentUnavailable } from "../resources/ArtifactReader.js";
 import {
+  ArtifactEntryContentUnavailable,
+  ArtifactReaderFailure,
+} from "../resources/ArtifactReader.js";
+import {
+  androidOtaFinalFieldCases,
   buildAndroidOtaPayload,
+  finalFieldAndroidOtaPayload,
   fullAndroidOtaPayload,
   v1AndroidOtaPayload,
 } from "../domain/firmware/androidOtaPayload.fixture.js";
@@ -17,6 +22,71 @@ import { scanCanonicalArtifactInventory } from "../../tests/fixtures/artifactInv
 
 const writeCarrier = (name: string, bytes: Buffer): Promise<string> =>
   createTestTempFile("rea-android-ota-", name, bytes);
+
+it.each([
+  { field: "canonical" as const, placement: "leadingFields" as const },
+  ...androidOtaFinalFieldCases.flatMap((field) =>
+    (["leadingFields", "trailingFields"] as const).map((placement) => ({
+      field,
+      placement,
+    })),
+  ),
+])(
+  "uses final protobuf values for $field ($placement) through inventory and partition reads",
+  async ({ field, placement }) => {
+    const bytes = finalFieldAndroidOtaPayload(field, placement);
+    const path = await writeCarrier("payload.bin", bytes);
+    // uint32 fields retain their low 32 bits even when the wide value is last.
+    const validFinal =
+      placement === "leadingFields" ||
+      field === "minor_version" ||
+      field.endsWith("_uint32");
+    if (!validFinal) {
+      await expect(scanCanonicalArtifactInventory(path)).rejects.toBeInstanceOf(
+        ArtifactReaderFailure,
+      );
+      return;
+    }
+    const snapshot = await scanCanonicalArtifactInventory(path);
+    expect(
+      snapshot.occurrences.find((row) => row.logical_path === ".")
+        ?.format_metadata,
+    ).toMatchObject({
+      block_size: 4,
+      minor_version: 0,
+      payload_kind: "full",
+      signatures_offset: 4,
+      signatures_size: 0,
+      dynamic_partition_groups: [
+        { name: "main", size: 4, partition_names: ["system"] },
+      ],
+    });
+    const hash = createHash("sha256").update("DATA").digest("hex");
+    expect(
+      snapshot.occurrences.find((row) => row.logical_path === "system.img"),
+    ).toMatchObject({
+      hash_status: "verified",
+      format_metadata: {
+        new_partition_info: { size: 4, hash_hex: hash },
+        old_partition_info: { size: 4, hash_hex: hash },
+        estimate_cow_size: 4,
+      },
+    });
+    const reader = new AndroidOtaPayloadArtifactReader(path);
+    try {
+      const entries = [];
+      for await (const entry of reader.entries()) entries.push(entry);
+      const partition = entries.find((entry) => entry.path === "system.img");
+      expect(
+        (await buffer(await reader.open(partition!))).equals(
+          Buffer.from("DATA"),
+        ),
+      ).toBe(true);
+    } finally {
+      await reader.close();
+    }
+  },
+);
 
 it("distinguishes supported OTA payload bytes from opaque ZIP members", async () => {
   const archive = zipArchive([

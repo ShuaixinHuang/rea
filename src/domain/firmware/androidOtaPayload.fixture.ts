@@ -9,12 +9,18 @@ import {
   ANDROID_OTA_MAGIC,
 } from "./androidOtaPayload.js";
 
-export interface AndroidOtaExtentFixture {
+/** Literal occurrences around the typed fields for protobuf ordering controls. */
+interface OtaWireFields {
+  readonly leadingFields?: Uint8Array;
+  readonly trailingFields?: Uint8Array;
+}
+
+export interface AndroidOtaExtentFixture extends OtaWireFields {
   readonly startBlock: number;
   readonly numBlocks: number;
 }
 
-export interface AndroidOtaOperationFixture {
+export interface AndroidOtaOperationFixture extends OtaWireFields {
   readonly type: number;
   readonly data?: Uint8Array;
   readonly dataOffset?: number;
@@ -24,7 +30,7 @@ export interface AndroidOtaOperationFixture {
   readonly srcExtents?: readonly AndroidOtaExtentFixture[];
 }
 
-export interface AndroidOtaPartitionFixture {
+export interface AndroidOtaPartitionFixture extends OtaWireFields {
   readonly name: string;
   readonly newSize?: number;
   readonly newHash?: Uint8Array;
@@ -43,12 +49,12 @@ export interface AndroidOtaPartitionFixture {
   readonly omitNewHash?: boolean;
 }
 
-interface AndroidOtaPartitionInfoFixture {
-  readonly size?: number;
-  readonly hash?: Uint8Array;
+interface AndroidOtaPartitionInfoFixture extends OtaWireFields {
+  readonly size?: number | undefined;
+  readonly hash?: Uint8Array | undefined;
 }
 
-export interface AndroidOtaGroupFixture {
+export interface AndroidOtaGroupFixture extends OtaWireFields {
   readonly name: string;
   readonly size?: number;
   readonly partitionNames: readonly string[];
@@ -61,7 +67,7 @@ export interface AndroidOtaApexFixture {
   readonly decompressedSize?: number;
 }
 
-export interface AndroidOtaPayloadFixture {
+export interface AndroidOtaPayloadFixture extends OtaWireFields {
   readonly majorVersion?: number;
   readonly minorVersion?: number;
   readonly blockSize?: number;
@@ -81,21 +87,135 @@ export interface AndroidOtaPayloadFixture {
   readonly truncateTo?: number;
 }
 
+export const androidOtaFinalFieldCases = [
+  "block_size",
+  "minor_version",
+  "signature_offset",
+  "signature_size",
+  "new_partition_size",
+  "old_partition_size",
+  "cow_size",
+  "data_offset",
+  "data_length",
+  "data_hash",
+  "extent_start",
+  "extent_count",
+  "operation_type",
+  "group_size",
+  "block_size_uint32",
+  "minor_version_uint32",
+] as const;
+
+/** One selected field occurrence, placed before or after its canonical value. */
+export const finalFieldAndroidOtaPayload = (
+  field: (typeof androidOtaFinalFieldCases)[number] | "canonical" | "all",
+  placement: "leadingFields" | "trailingFields" = "leadingFields",
+): Buffer => {
+  const unsafe = 1n << 53n;
+  const uint = (number: number, value: bigint) =>
+    new BinaryWriter().tag(number, WireType.Varint).uint64(value).finish();
+  const selected = (
+    name: (typeof androidOtaFinalFieldCases)[number],
+    bytes: Uint8Array,
+  ) => (field === name || field === "all" ? bytes : new Uint8Array());
+  const fields = (...bytes: Uint8Array[]) => ({
+    [placement]: Buffer.concat(bytes),
+  });
+  const data = Buffer.from("DATA");
+  const hash = createHash("sha256").update(data).digest();
+  const info = (name: "old_partition_size" | "new_partition_size") => {
+    const bad = { leadingFields: selected(name, uint(1, unsafe)) };
+    const good = { size: 4, hash };
+    return [
+      ...(placement === "leadingFields" ? [bad, good] : [good, bad]),
+      {},
+      { hash },
+    ];
+  };
+  return buildAndroidOtaPayload({
+    blockSize: 4,
+    minorVersion: 0,
+    metadataSignature: new Uint8Array(),
+    payloadSignature: new Uint8Array(),
+    ...fields(
+      selected("block_size", uint(3, 0n)),
+      selected("minor_version", uint(12, unsafe)),
+      selected("signature_offset", uint(4, unsafe)),
+      selected("signature_size", uint(5, unsafe)),
+      selected("block_size_uint32", uint(3, (1n << 32n) + 4n)),
+      selected("minor_version_uint32", uint(12, 1n << 32n)),
+    ),
+    partitions: [
+      {
+        name: "system",
+        oldInfoFragments: info("old_partition_size"),
+        newInfoFragments: info("new_partition_size"),
+        estimateCowSize: 4,
+        ...fields(selected("cow_size", uint(19, unsafe))),
+        operations: [
+          {
+            type: 0,
+            data,
+            dataHash: hash,
+            ...fields(
+              selected("data_offset", uint(2, unsafe)),
+              selected("data_length", uint(3, unsafe)),
+              selected(
+                "data_hash",
+                new BinaryWriter()
+                  .tag(8, WireType.LengthDelimited)
+                  .bytes(Buffer.from("x"))
+                  .finish(),
+              ),
+              selected(
+                "operation_type",
+                new BinaryWriter().tag(1, WireType.Varint).int32(-1).finish(),
+              ),
+            ),
+            dstExtents: [
+              {
+                startBlock: 0,
+                numBlocks: 1,
+                ...fields(
+                  selected("extent_start", uint(1, unsafe)),
+                  selected("extent_count", uint(2, unsafe)),
+                ),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    groups: [
+      {
+        name: "main",
+        size: 4,
+        partitionNames: ["system"],
+        ...fields(selected("group_size", uint(2, unsafe))),
+      },
+    ],
+  });
+};
+
 const encodeExtent = (
   writer: BinaryWriter,
   extent: AndroidOtaExtentFixture,
 ): void => {
+  if (extent.leadingFields !== undefined) writer.raw(extent.leadingFields);
   writer.tag(1, WireType.Varint).uint64(extent.startBlock);
   writer.tag(2, WireType.Varint).uint64(extent.numBlocks);
+  if (extent.trailingFields !== undefined) writer.raw(extent.trailingFields);
 };
 
 const encodePartitionInfo = (
   writer: BinaryWriter,
-  size: number | undefined,
-  hash: Uint8Array | undefined,
+  info: AndroidOtaPartitionInfoFixture,
 ): void => {
-  if (size !== undefined) writer.tag(1, WireType.Varint).uint64(size);
-  if (hash !== undefined) writer.tag(2, WireType.LengthDelimited).bytes(hash);
+  if (info.leadingFields !== undefined) writer.raw(info.leadingFields);
+  if (info.size !== undefined) writer.tag(1, WireType.Varint).uint64(info.size);
+  if (info.hash !== undefined)
+    writer.tag(2, WireType.LengthDelimited).bytes(info.hash);
+  if (info.trailingFields !== undefined) writer.raw(info.trailingFields);
 };
 
 const extentForData = (
@@ -170,6 +290,8 @@ const encodeOperation = (
   dataOffset: number,
   blockSize: number,
 ): void => {
+  if (operation.leadingFields !== undefined)
+    writer.raw(operation.leadingFields);
   writer.tag(1, WireType.Varint).int32(operation.type);
   const dataLength = operation.dataLength ?? operation.data?.length ?? 0;
   const offset = operation.dataOffset ?? dataOffset;
@@ -194,6 +316,8 @@ const encodeOperation = (
   }
   if (operation.dataHash !== undefined)
     writer.tag(8, WireType.LengthDelimited).bytes(operation.dataHash);
+  if (operation.trailingFields !== undefined)
+    writer.raw(operation.trailingFields);
 };
 
 const encodePartition = (
@@ -202,6 +326,8 @@ const encodePartition = (
   blob: { offset: number; chunks: Uint8Array[] },
   blockSize: number,
 ): void => {
+  if (partition.leadingFields !== undefined)
+    writer.raw(partition.leadingFields);
   writer.tag(1, WireType.LengthDelimited).string(partition.name);
   if (partition.runPostinstall !== undefined)
     writer.tag(2, WireType.Varint).bool(partition.runPostinstall);
@@ -216,7 +342,7 @@ const encodePartition = (
       : []);
   for (const info of oldInfos) {
     writer.tag(6, WireType.LengthDelimited).fork();
-    encodePartitionInfo(writer, info.size, info.hash);
+    encodePartitionInfo(writer, info);
     writer.join();
   }
   const image = partitionImage(partition, blockSize);
@@ -234,7 +360,7 @@ const encodePartition = (
       : []);
   for (const info of newInfos) {
     writer.tag(7, WireType.LengthDelimited).fork();
-    encodePartitionInfo(writer, info.size, info.hash);
+    encodePartitionInfo(writer, info);
     writer.join();
   }
   for (const operation of partition.operations) {
@@ -266,17 +392,21 @@ const encodePartition = (
   }
   if (partition.estimateCowSize !== undefined)
     writer.tag(19, WireType.Varint).uint64(partition.estimateCowSize);
+  if (partition.trailingFields !== undefined)
+    writer.raw(partition.trailingFields);
 };
 
 const encodeGroup = (
   writer: BinaryWriter,
   group: AndroidOtaGroupFixture,
 ): void => {
+  if (group.leadingFields !== undefined) writer.raw(group.leadingFields);
   writer.tag(1, WireType.LengthDelimited).string(group.name);
   if (group.size !== undefined)
     writer.tag(2, WireType.Varint).uint64(group.size);
   for (const name of group.partitionNames)
     writer.tag(3, WireType.LengthDelimited).string(name);
+  if (group.trailingFields !== undefined) writer.raw(group.trailingFields);
 };
 
 const encodeApex = (
@@ -298,6 +428,7 @@ const encodeManifest = (
   signaturesSize: number | null,
 ): Uint8Array => {
   const writer = new BinaryWriter();
+  if (fixture.leadingFields !== undefined) writer.raw(fixture.leadingFields);
   const blockSize = fixture.blockSize ?? ANDROID_OTA_DEFAULT_BLOCK_SIZE;
   writer.tag(3, WireType.Varint).uint32(blockSize);
   if (signaturesOffset !== null)
@@ -344,6 +475,7 @@ const encodeManifest = (
   }
   if (fixture.securityPatchLevel !== undefined)
     writer.tag(18, WireType.LengthDelimited).string(fixture.securityPatchLevel);
+  if (fixture.trailingFields !== undefined) writer.raw(fixture.trailingFields);
   return writer.finish();
 };
 
