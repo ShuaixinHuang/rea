@@ -1,4 +1,5 @@
 import type { WorkflowAnalysisPort } from "../WorkflowEvidence.js";
+import type { ProgressReporter } from "../../ports/ProgressReporter.js";
 import {
   ExportPublishedCleanupFailure,
   type StagedExportFile,
@@ -70,6 +71,13 @@ const PROFILE_UNAVAILABLE =
   "The provider did not commit an analysis profile, so this export cannot be resumed.";
 const DUPLICATE_ADDRESSES =
   "Duplicate procedure addresses were coalesced to the first matching inventory row.";
+/**
+ * How long one provider request for a function may stay pending before the
+ * export names it, and how often it repeats while the wait continues. A
+ * provider may be unable to bound or interrupt one decompilation, so the wait
+ * itself is reported.
+ */
+export const FUNCTION_WAIT_REPORT_INTERVAL_MS = 5_000;
 /** Consecutive output_io failures after which an export stops. */
 export const OUTPUT_IO_STREAK_LIMIT = 5;
 const unaddressedRows = (count: number): string =>
@@ -101,6 +109,11 @@ interface PublishState {
   readonly failures: InlineFailure[];
   inlineFailureBytes: number;
   readonly recentFailures: PublishState["failures"];
+  /**
+   * Functions the next decompile request names as upcoming, itself first. The
+   * request that carries them clears it.
+   */
+  readAhead: readonly string[] | undefined;
   /**
    * Consecutive output_io failures. A verified file, a write, or any other
    * outcome ends the run of failures; a recorded external function does not.
@@ -142,6 +155,7 @@ export const decompileAll = async (
   sessionAnalysis: WorkflowAnalysisPort,
   input: DecompileDirectoryInput,
   signal?: AbortSignal,
+  progress?: ProgressReporter,
 ): Promise<Result<JsonValue, AnalysisError>> => {
   const analysis = withInlineSessionLimitations(sessionAnalysis);
   const bounds = validateDecompileBounds(input);
@@ -177,6 +191,7 @@ export const decompileAll = async (
     failures: [],
     inlineFailureBytes: 2,
     recentFailures: [],
+    readAhead: undefined,
     outputIoStreak: 0,
   };
   let published: Result<void, AnalysisError> | undefined;
@@ -191,6 +206,7 @@ export const decompileAll = async (
       procedures: attemptOrder(session, selection.procedures),
       identity: loaded.value.identity,
       signal,
+      progress,
       limit: input.limit,
       retryFailed: input.retry_failed,
       state,
@@ -400,6 +416,7 @@ interface PublishInput {
   readonly procedures: readonly SelectedProcedure[];
   readonly identity: ExportIdentity;
   readonly signal: AbortSignal | undefined;
+  readonly progress: ProgressReporter | undefined;
   readonly limit: number | undefined;
   readonly retryFailed: DecompileDirectoryInput["retry_failed"];
   readonly state: PublishState;
@@ -522,22 +539,26 @@ const publishGroups = async (
   // Attempts admitted against the limit; state.attempted follows at commit.
   let admitted = 0;
   let committedAt = performance.now();
+  // Index after the last function a read-ahead window already examined.
+  let preparedUntil = 0;
+  // Decisions a read-ahead window made for later functions; the loop takes
+  // each one instead of deciding that function again.
+  const decided = new Map<number, ProcedureDecision>();
   const stop = (error: AnalysisError): Promise<Result<void, AnalysisError>> => {
     group.push({ kind: "stopped", error });
     return commitGroup(input, group);
   };
-  for (const procedure of input.procedures) {
+  for (const [index, procedure] of input.procedures.entries()) {
     if (isAborted(input.signal))
       return stop(cancelledBy("decompile_all", input.signal));
-    const existing = await existingFile(
-      input.session,
-      procedure.address,
-      input.signal,
-    );
-    if (typeof existing === "object") return stop(existing.error);
+    const decision =
+      decided.get(index) ??
+      (await decideProcedure(input.session, procedure.address, input.signal));
+    decided.delete(index);
+    if (decision.kind === "error") return stop(decision.error);
     if (isAborted(input.signal))
       return stop(cancelledBy("decompile_all", input.signal));
-    if (existing === "skip") {
+    if (decision.kind === "skip") {
       // The file verified again after a later failure, so the journal and
       // index report it as written instead of keeping the stale failure.
       const written = input.session.lastWritten(procedure.address);
@@ -549,26 +570,30 @@ const publishGroups = async (
             ? written
             : undefined,
       });
-    } else if (
-      // The journal header pins the target, provider and profile, so a
-      // recorded external classification still holds. Asking again would only
-      // spend the limit, and a limit below the external count would leave
-      // functions remaining on every resume.
-      // A conflicting or unreadable file at its reserved path is still reported
-      // below rather than hidden by the skip.
-      existing === "write" &&
-      input.session.record(procedure.address)?.status === "external"
-    ) {
+    } else if (decision.kind === "external") {
       group.push({ kind: "retained_external" });
     } else {
       if (input.limit !== undefined && admitted >= input.limit) continue;
+      if (decision.existing === "write" && index >= preparedUntil) {
+        const window = await decompileReadAhead(
+          input,
+          index,
+          admitted,
+          decided,
+        );
+        preparedUntil = window.until;
+        input.state.readAhead =
+          window.procedures.length > 1 ? window.procedures : undefined;
+      }
       admitted += 1;
       const attempt = await attemptOne(
         input,
         procedure,
-        existing,
+        decision.existing,
         bodySupport,
         (record) => group.push({ kind: "superseded", record }),
+        (operation, pending) =>
+          reportingProviderWait(input, procedure, index, operation, pending),
       );
       bodySupport = attempt.bodySupport;
       group.push({ kind: "attempt", procedure, attempt });
@@ -760,6 +785,162 @@ const settle = async (
     : undefined;
 };
 
+/** What this call does with one selected function. */
+type ProcedureDecision =
+  /** Its file reads back and verifies against the journal. */
+  | { readonly kind: "skip" }
+  /** The journal records it as external; asking again would spend the limit. */
+  | { readonly kind: "external" }
+  /** It consumes the limit: decompile it, or report its file problem. */
+  | { readonly kind: "attempt"; readonly existing: "write" | "conflict" | "io" }
+  | { readonly kind: "error"; readonly error: AnalysisError };
+
+const decideProcedure = async (
+  session: DecompileExport,
+  address: string,
+  signal: AbortSignal | undefined,
+): Promise<ProcedureDecision> => {
+  const existing = await existingFile(session, address, signal);
+  if (typeof existing === "object")
+    return { kind: "error", error: existing.error };
+  if (existing === "skip") return { kind: "skip" };
+  // The journal header pins the target, provider and profile, so a
+  // recorded external classification still holds. Asking again would only
+  // spend the limit, and a limit below the external count would leave
+  // functions remaining on every resume.
+  // A conflicting or unreadable file at its reserved path is still reported
+  // rather than hidden by the skip.
+  if (existing === "write" && session.record(address)?.status === "external")
+    return { kind: "external" };
+  return { kind: "attempt", existing };
+};
+
+/**
+ * How many upcoming functions one decompile request names. A provider that
+ * prepares them together retains that many results at most, so a larger
+ * window would only discard work; this is a batching size, not an analysis
+ * limit, and a provider is free to ignore it.
+ */
+const DECOMPILE_READ_AHEAD = 32;
+
+/**
+ * The functions this call will decompile next, starting with the one at
+ * `from`. Each later function is decided once, the way the loop decides it,
+ * and the decision is kept for the loop. Every attempt, including a file
+ * problem that decompiles nothing, counts against the caller's limit.
+ */
+const decompileReadAhead = async (
+  input: PublishInput,
+  from: number,
+  admitted: number,
+  decided: Map<number, ProcedureDecision>,
+): Promise<{
+  readonly procedures: readonly string[];
+  readonly until: number;
+}> => {
+  // `admitted` counts attempts before this one; state.attempted follows only
+  // when a group commits.
+  const attemptsLeft =
+    input.limit === undefined
+      ? Number.POSITIVE_INFINITY
+      : input.limit - admitted;
+  const procedures = [input.procedures[from]!.address];
+  let attempts = 1;
+  let index = from + 1;
+  for (; index < input.procedures.length; index++) {
+    if (procedures.length >= DECOMPILE_READ_AHEAD || attempts >= attemptsLeft)
+      break;
+    if (isAborted(input.signal)) break;
+    const address = input.procedures[index]!.address;
+    let decision = decided.get(index);
+    if (decision === undefined) {
+      decision = await decideProcedure(input.session, address, input.signal);
+      decided.set(index, decision);
+    }
+    // The loop reports the failure when it reaches this function.
+    if (decision.kind === "error") break;
+    if (decision.kind !== "attempt") continue;
+    attempts += 1;
+    if (decision.existing === "write") procedures.push(address);
+  }
+  return { procedures, until: index };
+};
+
+/**
+ * The planned window from the function this decompile request carries,
+ * which a provider reads as its own. A function the window named earlier
+ * may send no decompile request, for example when procedure_info classifies
+ * it as external, so the window is rebased here rather than when planned.
+ */
+const takeReadAhead = (
+  state: PublishState,
+  address: string,
+): readonly string[] | undefined => {
+  const window = state.readAhead;
+  state.readAhead = undefined;
+  const from = window?.indexOf(address) ?? -1;
+  const carried = from < 0 ? [] : window!.slice(from);
+  return carried.length > 1 ? carried : undefined;
+};
+
+/** The provider requests an export makes for one function. */
+type FunctionRequest = "procedure_info" | "procedure_pseudo_code";
+
+/** Wrap one provider request for the current function in wait reporting. */
+type ProviderWait = <Value>(
+  operation: FunctionRequest,
+  pending: Promise<Value>,
+) => Promise<Value>;
+
+const WAITING_FOR: Readonly<Record<FunctionRequest, string>> = {
+  procedure_info: "read the body of",
+  procedure_pseudo_code: "decompile",
+};
+
+/**
+ * Name the function and the provider request an export is waiting on once it
+ * has been pending for a reporting interval, and again each interval until it
+ * settles. Only provider requests are timed: journal and file writes are the
+ * export's own work, so a slow output volume is never reported as a provider
+ * wait. Requests that settle sooner report nothing, so a healthy export stays
+ * quiet.
+ */
+const reportingProviderWait = async <Value>(
+  input: PublishInput,
+  procedure: SelectedProcedure,
+  index: number,
+  operation: FunctionRequest,
+  pending: Promise<Value>,
+): Promise<Value> => {
+  const { progress } = input;
+  if (progress === undefined) return pending;
+  const startedAt = performance.now();
+  const subject =
+    procedure.name === null
+      ? procedure.address
+      : `${procedure.name} at ${procedure.address}`;
+  const timer = setInterval(() => {
+    if (isAborted(input.signal)) return;
+    const elapsedSeconds = Math.floor((performance.now() - startedAt) / 1000);
+    // Reporting is observational; its failure cannot change the export.
+    void Promise.resolve()
+      .then(() =>
+        progress.report({
+          phase: "decompile_all",
+          completed: index,
+          total: input.procedures.length,
+          message: `Waiting for the provider to ${WAITING_FOR[operation]} ${subject} (${String(elapsedSeconds)}s elapsed); function ${String(index + 1)} of ${String(input.procedures.length)} selected.`,
+        }),
+      )
+      .catch(() => undefined);
+  }, FUNCTION_WAIT_REPORT_INTERVAL_MS);
+  try {
+    return await pending;
+  } finally {
+    clearInterval(timer);
+  }
+};
+
 /** One function this call takes on: report a file problem or decompile it. */
 const attemptOne = async (
   input: PublishInput,
@@ -767,9 +948,16 @@ const attemptOne = async (
   existing: "write" | "conflict" | "io",
   bodySupport: "unknown" | "unavailable",
   retainSuperseded: (record: DecompileDirectoryFunctionRecord) => void,
+  providerWait: ProviderWait,
 ): Promise<Attempt> => {
   if (existing === "write")
-    return observeOne({ ...input, procedure, bodySupport, retainSuperseded });
+    return observeOne({
+      ...input,
+      procedure,
+      bodySupport,
+      retainSuperseded,
+      providerWait,
+    });
   const reason =
     existing === "conflict"
       ? {
@@ -805,6 +993,8 @@ const observeOne = async (input: {
   readonly bodySupport: "unknown" | "unavailable";
   readonly retryFailed: DecompileDirectoryInput["retry_failed"];
   readonly retainSuperseded: (record: DecompileDirectoryFunctionRecord) => void;
+  readonly state: PublishState;
+  readonly providerWait: ProviderWait;
 }): Promise<Attempt> => {
   const body = await readBody(
     input.analysis,
@@ -812,6 +1002,7 @@ const observeOne = async (input: {
     input.identity,
     input.signal,
     input.bodySupport,
+    input.providerWait,
   );
   if (body.kind === "error")
     return {
@@ -846,10 +1037,17 @@ const observeOne = async (input: {
       kind: "external",
       record: externalRecord(input.procedure, body.fact, infoCaveats),
     });
-  let decompiled = await input.analysis.execute(
+  const readAhead = takeReadAhead(input.state, input.procedure.address);
+  let decompiled = await input.providerWait(
     "procedure_pseudo_code",
-    { procedure: input.procedure.address },
-    executionOptions(input.signal),
+    input.analysis.execute(
+      "procedure_pseudo_code",
+      { procedure: input.procedure.address },
+      {
+        ...executionOptions(input.signal),
+        ...(readAhead === undefined ? {} : { upcomingDecompiles: readAhead }),
+      },
+    ),
   );
   // A provider still owns cleanup even if the caller aborted meanwhile.
   if (!decompiled.ok && decompiled.error.cleanupIncomplete)
@@ -883,10 +1081,13 @@ const observeOne = async (input: {
         kind: "stopped",
         error: cancelledBy("decompile_all", input.signal),
       });
-    decompiled = await input.analysis.execute(
+    decompiled = await input.providerWait(
       "procedure_pseudo_code",
-      { procedure: input.procedure.address, analysis: "independent_fresh" },
-      executionOptions(input.signal),
+      input.analysis.execute(
+        "procedure_pseudo_code",
+        { procedure: input.procedure.address, analysis: "independent_fresh" },
+        executionOptions(input.signal),
+      ),
     );
     if (!decompiled.ok && decompiled.error.cleanupIncomplete)
       return attempt({ kind: "stopped", error: decompiled.error });
@@ -984,6 +1185,7 @@ const readBody = async (
   identity: ExportIdentity,
   signal: AbortSignal | undefined,
   support: "unknown" | "unavailable",
+  providerWait: ProviderWait,
 ): Promise<
   | {
       readonly kind: "body";
@@ -1014,10 +1216,13 @@ const readBody = async (
       fact: unavailableBody(BODY_UNAVAILABLE),
       support,
     };
-  const observed = await analysis.execute(
+  const observed = await providerWait(
     "procedure_info",
-    { procedure: address },
-    executionOptions(signal),
+    analysis.execute(
+      "procedure_info",
+      { procedure: address },
+      executionOptions(signal),
+    ),
   );
   if (!observed.ok) {
     if (

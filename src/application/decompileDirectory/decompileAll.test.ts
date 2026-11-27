@@ -28,6 +28,7 @@ import {
   OUTPUT_IO_STREAK_LIMIT,
 } from "./decompileAll.js";
 import { DecompileExport } from "./exportTree.js";
+import { FUNCTION_WAIT_REPORT_INTERVAL_MS } from "./decompileAll.js";
 import { ExportResources } from "./exportResources.js";
 import { selectProcedures, validateDecompileBounds } from "./selection.js";
 import { OwnedFileHandle } from "../../filesystem/OwnedFileHandle.js";
@@ -74,6 +75,7 @@ interface RecordedCall {
   readonly operation: AnalysisOperation;
   readonly procedure: unknown;
   readonly origin: unknown;
+  readonly upcoming?: readonly string[];
 }
 
 const subject = {
@@ -173,6 +175,9 @@ const harness = (options?: {
         operation,
         procedure: parameters.procedure,
         origin: execution?.selectorOrigin,
+        ...(execution?.upcomingDecompiles === undefined
+          ? {}
+          : { upcoming: execution.upcomingDecompiles }),
       });
       if (operation === "list_procedures")
         return Promise.resolve(
@@ -887,6 +892,97 @@ describe("decompile_all filters and layout", () => {
     ).toContain("Foo::helper");
   });
 
+  it("names the functions it will decompile next on the first request of a window", async () => {
+    const first = harness();
+    expect((await run(first.tools, directory(), { limit: 1 })).ok).toBe(true);
+    // One function is not a batch, so the limit leaves nothing to prepare.
+    expect(
+      of(first.calls, "procedure_pseudo_code").map((call) => call.upcoming),
+    ).toEqual([undefined]);
+
+    const second = harness();
+    expect((await run(second.tools, directory(), { resume: true })).ok).toBe(
+      true,
+    );
+    // The verified file is skipped; the remaining functions form one window,
+    // named once, in the order they will be requested.
+    expect(
+      of(second.calls, "procedure_pseudo_code").map((call) => [
+        call.procedure,
+        call.upcoming,
+      ]),
+    ).toEqual([
+      ["0x2000", ["0x2000", "0x3000"]],
+      ["0x3000", undefined],
+    ]);
+  });
+
+  it("names only the functions a resume will request, including deleted files", async () => {
+    const procedures = ["0x1000", "0x2000", "0x3000", "0x4000"].map(
+      (address, index) => ({ address, name: `fn_${index}` }),
+    );
+    const first = harness({ procedures });
+    expect((await run(first.tools, directory(), { limit: 2 })).ok).toBe(true);
+    // Both journaled writes lose their files, so the resume requests them
+    // again and its limit is spent before the unwritten functions.
+    await rm(join(directory(), "functions/0x1000.c"));
+    await rm(join(directory(), "functions/0x2000.c"));
+
+    const resumed = harness({ procedures });
+    expect(
+      (await run(resumed.tools, directory(), { resume: true, limit: 2 })).ok,
+    ).toBe(true);
+    expect(
+      of(resumed.calls, "procedure_pseudo_code").map((call) => [
+        call.procedure,
+        call.upcoming,
+      ]),
+    ).toEqual([
+      ["0x1000", ["0x1000", "0x2000"]],
+      ["0x2000", undefined],
+    ]);
+  });
+
+  it("names consecutive windows that cover every requested function once", async () => {
+    const procedures = Array.from({ length: 40 }, (_, index) => ({
+      address: `0x${(0x1000 + index * 0x10).toString(16)}`,
+      name: `fn_${index}`,
+    }));
+    const addresses = procedures.map((procedure) => procedure.address);
+    const windows = (calls: readonly RecordedCall[]) =>
+      of(calls, "procedure_pseudo_code").flatMap((call) =>
+        call.upcoming === undefined ? [] : [[call.procedure, call.upcoming]],
+      );
+
+    const whole = harness({ procedures });
+    expect((await run(whole.tools, directory())).ok).toBe(true);
+    expect(windows(whole.calls)).toEqual([
+      [addresses[0], addresses.slice(0, 32)],
+      [addresses[32], addresses.slice(32)],
+    ]);
+
+    // The caller's limit ends the second window, not a full window size.
+    const limited = harness({ procedures });
+    expect(
+      (await run(limited.tools, `${directory()}-limited`, { limit: 34 })).ok,
+    ).toBe(true);
+    expect(windows(limited.calls)).toEqual([
+      [addresses[0], addresses.slice(0, 32)],
+      [addresses[32], addresses.slice(32, 34)],
+    ]);
+
+    // A function found to be external sends no decompile request, so the
+    // next request carries the rest of its window, naming itself first.
+    const external = harness({ procedures, external: [addresses[0]!] });
+    expect((await run(external.tools, `${directory()}-external`)).ok).toBe(
+      true,
+    );
+    expect(windows(external.calls)).toEqual([
+      [addresses[1], addresses.slice(1, 32)],
+      [addresses[32], addresses.slice(32)],
+    ]);
+  });
+
   it("stops at a limit and continues in address order on resume", async () => {
     const first = harness();
     const limited = await run(first.tools, directory(), { limit: 1 });
@@ -1049,6 +1145,93 @@ describe("decompile_all partial results", () => {
       index.functions.filter((record) => record.status === "failed"),
     ).toHaveLength(33);
     expect(JSON.stringify(index)).not.toContain(sentinel);
+  });
+
+  it("names the function and provider request it is waiting on, never its own writes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const decompiling = phaseGate();
+    const committing = phaseGate();
+    const base = harness({
+      procedures: [
+        { address: "0x1000", name: "quick" },
+        { address: "0x2000", name: "slow" },
+      ],
+    });
+    const port: AnalysisOperationPort = {
+      execute: async (operation, parameters, execution) => {
+        if (
+          operation === "procedure_pseudo_code" &&
+          parameters.procedure === "0x2000"
+        )
+          await decompiling.hold();
+        return base.port.execute(operation, parameters, execution);
+      },
+    };
+    const commit = DecompileExport.prototype.commitFunctionFile;
+    const commitSpy = vi
+      .spyOn(DecompileExport.prototype, "commitFunctionFile")
+      .mockImplementation(async function (
+        this: DecompileExport,
+        relativePath,
+        bytes,
+        ...rest
+      ) {
+        if (relativePath.includes("2000")) await committing.hold();
+        return commit.call(this, relativePath, bytes, ...rest);
+      });
+    const updates: unknown[] = [];
+    const running = new EnhancedTools(port).execute(
+      "decompile_all",
+      { output_directory: directory() },
+      undefined,
+      {
+        report: (update) => {
+          updates.push(update);
+          return Promise.reject(new Error("observer failed"));
+        },
+      },
+    );
+    try {
+      await withVerifierCleanup(async () => {
+        await decompiling.reached(running, "slow function decompile");
+        // The quick function settled before one interval and reported nothing.
+        expect(updates).toEqual([]);
+        await vi.advanceTimersByTimeAsync(FUNCTION_WAIT_REPORT_INTERVAL_MS * 2);
+        expect(updates).toEqual([
+          {
+            phase: "decompile_all",
+            completed: 1,
+            total: 2,
+            message: expect.stringMatching(
+              /^Waiting for the provider to decompile slow at 0x2000 \(\d+s elapsed\); function 2 of 2 selected\.$/u,
+            ),
+          },
+          expect.objectContaining({ phase: "decompile_all", completed: 1 }),
+        ]);
+        decompiling.release();
+        // A slow output volume is the export's own wait, not the provider's.
+        await committing.reached(running, "slow function file commit");
+        await vi.advanceTimersByTimeAsync(FUNCTION_WAIT_REPORT_INTERVAL_MS * 2);
+        expect(updates).toHaveLength(2);
+        committing.release();
+        const result = await running;
+        // A failing observer does not change the export.
+        expect(result.ok ? result.value : result.error).toMatchObject({
+          counts: { written: 2, failed: 0 },
+        });
+        await vi.advanceTimersByTimeAsync(FUNCTION_WAIT_REPORT_INTERVAL_MS * 2);
+        expect(updates).toHaveLength(2);
+      }, [
+        async () => {
+          decompiling.release();
+          committing.release();
+          await running;
+        },
+      ]);
+    } finally {
+      commitSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("leaves committed files in place when the caller cancels", async () => {
